@@ -18,7 +18,7 @@
 import type { Volatile } from '@deepseek-ai/cordis'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { ShellExecutor } from '@deepseek-ai/dsh-shell'
+import { ShellExecutor, waitForManagedRange } from '@deepseek-ai/dsh-shell'
 import type { CollectedOutput, ShellExecRequest, ShellExecSpec, ShellExecution, ShellProcess, ShellProcessRead, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import type { SubprocessCollect, SubprocessHandle, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { clampTimeout, deadline, MAX_TIMER_DELAY_MS, timeoutOf } from '@deepseek-ai/dsh-timeout'
@@ -383,6 +383,7 @@ export class PwshLocalExecutor extends ShellExecutor {
         this.onProcessDone(proc, providerFailure.note, true, error)
         disarm()
       }),
+      waitForExit: (signal?: AbortSignal): Promise<boolean> => waitForManagedRange(running, signal),
       readOutput: (): ShellProcessRead => {
         const out = collected.stdout.readFrom(stdoutOffset)
         const err = collected.stderr.readFrom(stderrOffset)

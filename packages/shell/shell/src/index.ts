@@ -93,4 +93,39 @@ export abstract class ShellExecutor extends Service {
   abstract execute(spec: ShellExecSpec): Promise<ShellExecution>
 }
 
+/**
+ * Observe a provider-managed process range through a {@link ShellProcess}.
+ *
+ * Shared by the shell executors so both dialects expose one implementation:
+ * true = range empty; false = this wait was aborted; rejection = the provider
+ * cannot observe the range (never silently report empty).
+ * @param running - the provider handle, or undefined when no process exists.
+ * @param signal - cancels this wait only.
+ * @returns the range-observation promise.
+ */
+export function waitForManagedRange(
+  running: { waitForExit?: () => Promise<void> } | undefined,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (running === undefined) return Promise.resolve(true)
+  const observe = running.waitForExit
+  if (typeof observe !== 'function') {
+    return Promise.reject(new Error('shell: the subprocess provider cannot observe the managed process range'))
+  }
+  let observation: Promise<void>
+  try {
+    observation = Promise.resolve(observe.call(running))
+  } catch (error) {
+    return Promise.reject(error)
+  }
+  if (signal === undefined) return observation.then(() => true)
+  if (signal.aborted) return Promise.resolve(false)
+  return new Promise<boolean>((resolve, reject) => {
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort)
+    const onAbort = (): void => { cleanup(); resolve(false) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    observation.then(() => { cleanup(); resolve(true) }, (error: unknown) => { cleanup(); reject(error) })
+  })
+}
+
 export default ShellExecutor
