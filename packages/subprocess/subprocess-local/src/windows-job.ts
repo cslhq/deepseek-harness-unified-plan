@@ -67,10 +67,20 @@ export function probeWindowsJob(internals: WindowsJobInternals = {}): boolean {
   }
 }
 
+/** What one range termination attempt proved about the managed range. */
+export interface RangeTerminationResult {
+  readonly state: 'terminated' | 'empty' | 'partial' | 'unknown'
+  readonly activeBefore?: number
+  readonly activeAfter?: number
+  readonly evidence: readonly string[]
+}
+
 class WindowsJobOwner implements BoundProcessOwner {
   private cancellationReason: unknown
   private cancellationReasonSet = false
   private terminationSent = false
+  private rangeTermination?: Promise<RangeTerminationResult>
+  private rangeSequence = 0
 
   constructor(
     private readonly runner: RunnerProcess,
@@ -108,6 +118,57 @@ class WindowsJobOwner implements BoundProcessOwner {
 
   async waitForExit(): Promise<void> {
     await this.exited
+  }
+
+  /**
+   * Terminate whatever the managed range still holds. Independent of
+   * {@link waitForExit}: this only requests termination and then asks the runner
+   * to re-observe the active count, so a successful request is never mistaken
+   * for an empty range. Concurrent and repeated calls share one settlement.
+   */
+  terminateRange(timeoutMs = 5_000): Promise<RangeTerminationResult> {
+    this.rangeTermination ??= this.runRangeTermination(timeoutMs)
+    return this.rangeTermination
+  }
+
+  private runRangeTermination(timeoutMs: number): Promise<RangeTerminationResult> {
+    if (this.directResultType() !== undefined && !this.runner.connected) {
+      return Promise.resolve({ state: 'unknown', evidence: ['runner-disconnected'] })
+    }
+    const id = ++this.rangeSequence
+    return new Promise<RangeTerminationResult>((resolve) => {
+      let settled = false
+      const finish = (result: RangeTerminationResult): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        this.runner.off?.('message', onMessage)
+        resolve(result)
+      }
+      const timer = setTimeout(() => {
+        finish({ state: 'unknown', evidence: [`no-ack:${String(timeoutMs)}ms`] })
+      }, timeoutMs)
+      const onMessage = (value: unknown): void => {
+        const reply = value as { type?: string; id?: number; active?: number; terminated?: boolean }
+        if (reply.type !== 'range-result' || reply.id !== id) return
+        const active = typeof reply.active === 'number' ? reply.active : undefined
+        const evidence = [`active-after:${String(active)}`, `terminated:${String(reply.terminated)}`]
+        if (active === undefined) {
+          finish({ state: 'unknown', evidence })
+          return
+        }
+        finish({ state: active === 0 ? (reply.terminated === true ? 'terminated' : 'empty') : 'partial', activeAfter: active, evidence })
+      }
+      this.runner.on('message', onMessage)
+      try {
+        this.runner.send?.({ type: 'terminate-range', id }, (error) => {
+          if (error === null || error === undefined) return
+          finish({ state: 'unknown', evidence: [`send-failed:${String(error)}`] })
+        })
+      } catch (error) {
+        finish({ state: 'unknown', evidence: [`send-threw:${String(error)}`] })
+      }
+    })
   }
 
   terminateForHostExit(): void {

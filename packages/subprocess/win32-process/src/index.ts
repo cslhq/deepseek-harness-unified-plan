@@ -30,6 +30,8 @@ export {
   terminateJob,
   waitForProcessExit,
 } from './process.ts'
+export { terminateJobRange } from './range.ts'
+export type { JobRangeResult, TerminateJobRangeOptions } from './range.ts'
 export type {
   CurrentTokenStdioFileDescriptors,
   CurrentTokenProcessSpawnOptions,
