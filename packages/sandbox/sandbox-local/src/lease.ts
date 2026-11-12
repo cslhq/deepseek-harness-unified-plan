@@ -14,6 +14,17 @@
 import type { ResidueLedger } from '@deepseek-ai/dsh-sandbox-windows-acl'
 
 export type LeaseKind = 'workspace' | 'temp'
+/** Session lifecycle as seen by the lease registry. */
+export type SessionDrainState = 'open' | 'draining' | 'drained' | 'residue'
+
+/** What one drain attempt reports. */
+export interface SessionDrainResult {
+  readonly state: 'drained' | 'residue'
+  /** Leases this session held and released during the drain. */
+  readonly released: number
+  /** Ledger ids still unconfirmed for this session when the drain finished. */
+  readonly residues: readonly string[]
+}
 export type LeaseState = 'held' | 'releasing' | 'released'
 export type LeaseOutcomeState = 'released' | 'quarantined'
 
@@ -87,12 +98,17 @@ interface LeaseRecord {
 export class ResourceLeaseRegistry {
   private readonly resources = new Map<string, ResourceRecord>()
   private readonly leases = new Map<string, LeaseRecord>()
+  private readonly sessions = new Map<string, { id: string; state: SessionDrainState; draining?: Promise<SessionDrainResult>; pendingResidues: Set<string> }>()
   private sequence = 0
 
   constructor(private readonly ledger: ResidueLedger) {}
 
   /** Register (or join) a shared resource and return one holder's lease. */
   acquire(resource: LeaseResource, sessionId: string): Lease {
+    const session = this.sessions.get(sessionId)
+    if (session !== undefined && session.state !== 'open') {
+      throw new Error(`session ${sessionId} is ${session.state}: no new lease may be acquired`)
+    }
     let record = this.resources.get(resource.key)
     if (record === undefined) {
       record = { key: resource.key, kind: resource.kind, resource, holders: 0, closed: false }
@@ -106,6 +122,69 @@ export class ResourceLeaseRegistry {
     const leaseRecord: LeaseRecord = { id, resourceKey: resource.key, kind: resource.kind, sessionId, state: 'held' }
     this.leases.set(id, leaseRecord)
     return this.view(leaseRecord)
+  }
+
+  /** Refuse further acquires for this session; its held leases stay valid. */
+  beginDrain(sessionId: string): SessionDrainState {
+    const record = this.sessions.get(sessionId)
+    if (record === undefined) {
+      this.sessions.set(sessionId, { id: sessionId, state: 'draining', pendingResidues: new Set() })
+      return 'draining'
+    }
+    if (record.state === 'open') record.state = 'draining'
+    return record.state
+  }
+
+  /** Current drain state of a session (open when never seen). */
+  sessionState(sessionId: string): SessionDrainState {
+    return this.sessions.get(sessionId)?.state ?? 'open'
+  }
+
+  /**
+   * Drain one session: refuse new leases, release every lease it still owns
+   * (a transferred lease belongs to the new owner and is left alone), then
+   * report what the ledger still cannot confirm.
+   *
+   * Idempotent and concurrent-safe: every caller shares one settlement.
+   * `drained` only means "this session released everything it held"; it is
+   * NOT proof that every resource was released — that is `residues` empty
+   * AND the release outcomes being `released`.
+   */
+  drainSession(sessionId: string): Promise<SessionDrainResult> {
+    const existing = this.sessions.get(sessionId)
+    if (existing?.draining !== undefined) return existing.draining
+    const record = existing ?? { id: sessionId, state: 'draining' as SessionDrainState, pendingResidues: new Set<string>() }
+    this.sessions.set(sessionId, record)
+    if (record.state === 'open') record.state = 'draining'
+    const run = (async (): Promise<SessionDrainResult> => {
+      const released = await this.releaseSession(sessionId)
+      // A quarantined release is an unconfirmed resource even when the ledger
+      // entry carries no session id, so both sources feed the result.
+      const quarantined = released
+        .filter(({ outcome }) => outcome.state !== 'released' && outcome.residueId !== undefined)
+        .map(({ outcome }) => outcome.residueId as string)
+      for (const id of quarantined) record.pendingResidues.add(id)
+      // Keep attribution to this session even when the ledger entry has no
+      // session id, so a later drain still sees its own unconfirmed resources.
+      for (const id of [...record.pendingResidues]) {
+        if (!this.ledger.has(id)) record.pendingResidues.delete(id)
+      }
+      const ledgerEntries = this.ledger
+        .open()
+        .filter((entry) => entry.sessionId === sessionId)
+        .map((entry) => entry.id)
+      const residues = [...new Set([...quarantined, ...record.pendingResidues, ...ledgerEntries])]
+      record.state = residues.length === 0 ? 'drained' : 'residue'
+      // A residue may be cleaned up later (directory retry), so a fresh drain
+      // must be allowed to re-evaluate; a drained session keeps its settlement.
+      if (residues.length > 0) record.draining = undefined
+      return { state: residues.length === 0 ? 'drained' : 'residue', released: released.length, residues }
+    })()
+    record.draining = run
+    run.catch(() => {
+      record.state = 'residue'
+    })
+    return run
   }
 
   /** Current holder count of one resource (0 when unknown/closed). */

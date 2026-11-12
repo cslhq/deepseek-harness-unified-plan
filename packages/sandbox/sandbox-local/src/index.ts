@@ -281,6 +281,10 @@ export class LocalSandboxProvider extends SandboxProvider {
   private readonly ledger = new ResidueLedger()
   /** Reference-counted holders of the shared workspace/temp resources. */
   private readonly leaseRegistry = new ResourceLeaseRegistry(this.ledger)
+  /** Cleanup promises started from synchronous paths; drained before teardown. */
+  private readonly pendingCleanup = new Set<Promise<unknown>>()
+  /** residueId → temp dir whose removal failed after a confirmed revoke. */
+  private readonly pendingTempDirDeletion = new Map<string, string>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -419,11 +423,12 @@ export class LocalSandboxProvider extends SandboxProvider {
         // Free the SID; a standing ACE (if the apply succeeded before a
         // post-apply throw) is the intended end state, not an error
         // artifact — nothing to revoke.
-        try {
-          grant.dispose()
-        } catch (cleanupError) {
-          throw new AggregateError([error, cleanupError], 'sandbox-local windows-acl workspace grant failed and its cleanup also failed')
-        }
+        // A synchronous catch cannot await: track the release so a later drain
+        // or teardown observes it instead of letting it float.
+        this.trackCleanup(grant.dispose().catch((cleanupError: unknown) => {
+          this.ledger.annotate(`grant:${grant.writeSid}`, { workspaceRoot })
+          this.ctx.logger.warn(cleanupError)
+        }))
         throw error
       }
       this.workspaceGrants.set(workspaceRoot, grant)
@@ -450,11 +455,10 @@ export class LocalSandboxProvider extends SandboxProvider {
     } catch (error) {
       const cleanupFailures: unknown[] = []
       if (grant !== undefined) {
-        try {
-          grant.dispose()
-        } catch (cleanupError) {
+        this.trackCleanup(grant.dispose().catch((cleanupError: unknown) => {
           cleanupFailures.push(cleanupError)
-        }
+          this.ledger.annotate(`grant:${grant.writeSid}`, { sessionId: String(sessionId), workspaceRoot })
+        }))
       }
       try {
         this.removeTempDir(tempDir)
@@ -473,8 +477,31 @@ export class LocalSandboxProvider extends SandboxProvider {
       kind: 'temp',
       residueId: `grant:${tempSid}`,
       releaseResource: async () => {
+        // ACE first, deletion second: a failed revoke keeps the directory so the
+        // identity and path stay recoverable.
         await grant.dispose()
-        this.removeTempDir(tempDir)
+        try {
+          this.removeTempDir(tempDir)
+        } catch (error) {
+          const dirResidueId = `dir:${tempDir}`
+          this.pendingTempDirDeletion.set(dirResidueId, tempDir)
+          this.ledger.register({
+            id: dirResidueId,
+            kind: 'temp-dir',
+            owner: 'LocalSandboxProvider',
+            sessionId: String(sessionId),
+            workspaceRoot,
+            paths: [tempDir],
+            sidString: tempSid,
+            removedPaths: [tempDir],
+            observedAcl: 'absent',
+            aceRemoved: false,
+            sidsFreed: true,
+            failures: [error],
+            observation: 'ACE revoked and SIDs freed; directory removal failed',
+          })
+          throw error
+        }
       },
     }, String(sessionId))
     return capability
@@ -495,7 +522,8 @@ export class LocalSandboxProvider extends SandboxProvider {
   }
 
   private async revokeAclGrants(): Promise<void> {
-    if (this.workspaceGrants.size === 0 && this.tempCapabilities.size === 0) return
+    if (this.workspaceGrants.size === 0 && this.tempCapabilities.size === 0 && this.pendingCleanup.size === 0) return
+    await Promise.allSettled([...this.pendingCleanup])
     const failures: unknown[] = []
     for (const lease of [...this.leaseRegistry.active()]) {
       const outcome = await lease.release().catch((error: unknown) => {
@@ -515,6 +543,40 @@ export class LocalSandboxProvider extends SandboxProvider {
     }
   }
 
+  /** Track a cleanup promise so no cleanup can float past a drain or teardown. */
+  private trackCleanup(promise: Promise<unknown>): void {
+    this.pendingCleanup.add(promise)
+    const settle = (): void => { this.pendingCleanup.delete(promise) }
+    promise.then(settle, settle)
+  }
+
+  /**
+   * Drain one session: no new lease may be acquired, every lease it still
+   * holds is released, and the resulting residues are reported. The returned
+   * state is `drained` only when nothing remains unconfirmed.
+   */
+  async drainSession(sessionId: string): Promise<import('./lease.ts').SessionDrainResult> {
+    // Block new acquires synchronously, before the first await: otherwise an
+    // acquire in the same tick could slip past the drain.
+    this.leaseRegistry.beginDrain(sessionId)
+    // Cleanups registered while draining are picked up on the next pass; a
+    // one-shot snapshot could miss a cleanup tracked after it was taken.
+    for (let pass = 0; pass < 4 && this.pendingCleanup.size > 0; pass += 1) {
+      await Promise.allSettled([...this.pendingCleanup])
+    }
+    const result = await this.leaseRegistry.drainSession(sessionId)
+    // Drop only the provider entries whose resources were actually released.
+    if (result.state === 'drained') {
+      for (const [workspaceRoot] of [...this.workspaceGrants]) {
+        if (this.leaseRegistry.holders(`workspace:${workspaceRoot}`) === 0) this.workspaceGrants.delete(workspaceRoot)
+      }
+      for (const [key] of [...this.tempCapabilities]) {
+        if (this.leaseRegistry.holders(`temp:${key}`) === 0) this.tempCapabilities.delete(key)
+      }
+    }
+    return result
+  }
+
   /**
    * Release every lease a session still holds (session end). Other sessions
    * sharing the same workspace grant are unaffected: only the last release
@@ -531,6 +593,28 @@ export class LocalSandboxProvider extends SandboxProvider {
       }
     }
     return released.map(({ outcome }) => outcome)
+  }
+
+  /**
+   * Retry a directory removal whose ACE revoke already succeeded. Only the
+   * deletion runs; the entry closes only after the directory is gone.
+   */
+  retryTempDirDeletion(residueId: string): boolean {
+    const dir = this.pendingTempDirDeletion.get(residueId)
+    if (dir === undefined) return false
+    this.removeTempDir(dir)
+    this.pendingTempDirDeletion.delete(residueId)
+    this.ledger.register({
+      id: residueId,
+      kind: 'temp-dir',
+      owner: 'LocalSandboxProvider',
+      paths: [],
+      aceRemoved: true,
+      sidsFreed: true,
+      observation: 'directory removed on retry',
+    })
+    this.ledger.close(residueId)
+    return true
   }
 
   /** Remove one provider-owned private temp directory (injectable for cleanup tests). */
