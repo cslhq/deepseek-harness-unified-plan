@@ -39,6 +39,8 @@ import type { ConfinedArgv, ConfinedSandboxMode, RunnerFailureRule, SandboxEnfor
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { AclWriteGrant, ResidueLedger, assertTempRootOutsideWorkspace, registerAclDiagnosisSkill, tempWriteSid, workspaceWriteSid } from '@deepseek-ai/dsh-sandbox-windows-acl'
 import type { ResidueEntry } from '@deepseek-ai/dsh-sandbox-windows-acl'
+import { ResourceLeaseRegistry } from './lease.ts'
+import type { Lease, LeaseOutcome } from './lease.ts'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { bwrapProfileArgs, landlockProfileArgs, seatbeltProfileArgs } from './profiles.ts'
 
@@ -277,6 +279,8 @@ export class LocalSandboxProvider extends SandboxProvider {
   private readonly tempCapabilities = new Map<string, AclTempCapability>()
   /** Residues this provider could not confirm released (never auto-cleared). */
   private readonly ledger = new ResidueLedger()
+  /** Reference-counted holders of the shared workspace/temp resources. */
+  private readonly leaseRegistry = new ResourceLeaseRegistry(this.ledger)
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -424,6 +428,16 @@ export class LocalSandboxProvider extends SandboxProvider {
       }
       this.workspaceGrants.set(workspaceRoot, grant)
     }
+    // One lease per calling session: the standing workspace grant is shared.
+    this.leaseRegistry.acquire({
+      key: `workspace:${workspaceRoot}`,
+      kind: 'workspace',
+      residueId: `grant:${writeSid}`,
+      releaseResource: async () => {
+        const grant = this.workspaceGrants.get(workspaceRoot)
+        if (grant !== undefined) await grant.dispose()
+      },
+    }, String(sessionId))
     const key = JSON.stringify([String(sessionId), workspaceRoot])
     const existing = this.tempCapabilities.get(key)
     if (existing !== undefined) return existing
@@ -454,6 +468,15 @@ export class LocalSandboxProvider extends SandboxProvider {
     }
     const capability = { dir: tempDir, writeSid: tempSid, grant }
     this.tempCapabilities.set(key, capability)
+    this.leaseRegistry.acquire({
+      key: `temp:${key}`,
+      kind: 'temp',
+      residueId: `grant:${tempSid}`,
+      releaseResource: async () => {
+        await grant.dispose()
+        this.removeTempDir(tempDir)
+      },
+    }, String(sessionId))
     return capability
   }
 
@@ -474,30 +497,40 @@ export class LocalSandboxProvider extends SandboxProvider {
   private async revokeAclGrants(): Promise<void> {
     if (this.workspaceGrants.size === 0 && this.tempCapabilities.size === 0) return
     const failures: unknown[] = []
-    for (const [workspaceRoot, grant] of [...this.workspaceGrants]) {
-      try {
-        await grant.dispose()
-        this.workspaceGrants.delete(workspaceRoot)
-      } catch (error) {
+    for (const lease of [...this.leaseRegistry.active()]) {
+      const outcome = await lease.release().catch((error: unknown) => {
         failures.push(error)
-        this.ledger.annotate(`grant:${grant.writeSid}`, { workspaceRoot })
-      }
-    }
-    for (const [key, capability] of [...this.tempCapabilities]) {
-      try {
-        await capability.grant.dispose()
-        this.removeTempDir(capability.dir)
-        this.tempCapabilities.delete(key)
-      } catch (error) {
-        failures.push(error)
-        const [sessionId, workspaceRoot] = JSON.parse(key) as [string, string]
-        this.ledger.annotate(`grant:${capability.writeSid}`, { sessionId, workspaceRoot })
+        return { state: 'quarantined' as const }
+      })
+      if (outcome.state !== 'released') continue
+      if (lease.kind === 'workspace') {
+        this.workspaceGrants.delete(lease.resourceKey.slice('workspace:'.length))
+      } else {
+        this.tempCapabilities.delete(lease.resourceKey.slice('temp:'.length))
       }
     }
     if (failures.length > 0) {
       this.ctx.logger.warn(`sandbox-local: windows-acl grant cleanup completed with ${failures.length} failure(s)`)
       for (const error of failures) this.ctx.logger.warn(error)
     }
+  }
+
+  /**
+   * Release every lease a session still holds (session end). Other sessions
+   * sharing the same workspace grant are unaffected: only the last release
+   * reaches the resource.
+   */
+  async releaseSessionLeases(sessionId: string): Promise<readonly LeaseOutcome[]> {
+    const released = await this.leaseRegistry.releaseSession(sessionId)
+    for (const { lease, outcome } of released) {
+      if (outcome.state !== 'released') continue
+      if (lease.kind === 'workspace') {
+        this.workspaceGrants.delete(lease.resourceKey.slice('workspace:'.length))
+      } else {
+        this.tempCapabilities.delete(lease.resourceKey.slice('temp:'.length))
+      }
+    }
+    return released.map(({ outcome }) => outcome)
   }
 
   /** Remove one provider-owned private temp directory (injectable for cleanup tests). */
