@@ -1,6 +1,9 @@
 /** One-shot Linux exec bootstrap and Windows Job-owning subprocess runner. */
 
 import { SUBPROCESS_CONTROL_FD } from '@deepseek-ai/dsh-subprocess/control'
+import { randomUUID } from 'node:crypto'
+import { handleRangeRequest, isWindowsRangeLikeRequest, parseRangeRequest } from './range-handler.ts'
+import type { RangeRequest } from './range-handler.ts'
 import { closeSync } from 'node:fs'
 import {
   closeHandleChecked,
@@ -233,6 +236,12 @@ class WindowsJobRunner {
   private resultDelivered = false
   private finished = false
   private readonly completion = Promise.withResolvers<void>()
+  /** Stable Job identity for range replies; never a PID (PIDs are reused). */
+  private readonly jobId = randomUUID()
+  /** Runner instance identity, distinct from the Job identity. */
+  private readonly instanceId = randomUUID()
+  /** Duplicate request ids replay the first answer; no second native terminate. */
+  private readonly rangeReplies = new Map<number, unknown>()
 
   constructor(
     private readonly argv: string[],
@@ -252,6 +261,15 @@ class WindowsJobRunner {
 
   private readonly onMessage = (value: unknown): void => {
     if (this.finished) return
+    const range = parseRangeRequest(value)
+    if (range !== undefined) {
+      void this.handleRange(range)
+      return
+    }
+    if (isWindowsRangeLikeRequest(value)) {
+      this.host.send?.({ type: 'protocol-error', reason: 'invalid-range-request', observedAt: new Date().toISOString() })
+      return
+    }
     if (isWindowsTerminateRequest(value)) {
       this.requestTermination()
       return
@@ -269,6 +287,46 @@ class WindowsJobRunner {
     }
     this.startSeen = true
     void this.start(request)
+  }
+
+  /** Send the start handshake and resolve only after the IPC write completed. */
+  private sendStarted(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      if (!this.host.connected || this.host.send === undefined) { resolve(false); return }
+      try {
+        this.host.send({ type: 'started', jobId: this.jobId, instanceId: this.instanceId, pid: process.pid }, (error) => {
+          resolve(error === null || error === undefined)
+        })
+      } catch {
+        resolve(false)
+      }
+    })
+  }
+
+  /** Answer one range request against the runner-owned Job handle. */
+  private async handleRange(request: RangeRequest): Promise<void> {
+    const cached = this.rangeReplies.get(request.requestId)
+    if (cached !== undefined) {
+      this.host.send?.(cached)
+      return
+    }
+    const api = this.api
+    const job = this.jobHandle
+    if (api === undefined || job === undefined) {
+      this.host.send?.({
+        type: 'range-result',
+        requestId: request.requestId,
+        jobId: this.jobId,
+        state: 'unknown',
+        evidence: ['job-not-created'],
+        observedAt: new Date().toISOString(),
+      })
+      return
+    }
+    const reply = await handleRangeRequest(api, job, this.jobId, request)
+    const envelope = { ...reply, instanceId: this.instanceId }
+    this.rangeReplies.set(request.requestId, envelope)
+    this.host.send?.(envelope)
   }
 
   private readonly onDisconnect = (): void => {
@@ -317,6 +375,15 @@ class WindowsJobRunner {
       })
       this.processHandle = spawned.process
       this.jobHandle = spawned.job
+      // The handshake must complete before polling starts, so target-exit can
+      // never be published ahead of started — even for a target that exits
+      // immediately after spawn.
+      const handshake = await this.sendStarted()
+      if (!handshake) {
+        this.releaseOwnedJob()
+        this.finish(127)
+        return
+      }
       for (const fileDescriptor of request.control === 'pipe' ? [4, 5, 6, SUBPROCESS_CONTROL_FD] : [4, 5, 6]) {
         this.internals.closeFileDescriptor(fileDescriptor)
       }

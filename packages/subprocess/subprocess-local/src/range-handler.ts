@@ -10,6 +10,22 @@ import type { Win32ProcessBindings } from '@deepseek-ai/dsh-win32-process'
 import type { NativePtr } from '@deepseek-ai/dsh-win32-process'
 
 /** Request/response contract between the host and the runner. */
+/** Narrow an unknown IPC message to a range request; invalid shapes are ignored. */
+export function parseRangeRequest(value: unknown): RangeRequest | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const message = value as { type?: unknown; requestId?: unknown }
+  if (message.type !== 'terminate-range' && message.type !== 'verify-range') return undefined
+  if (typeof message.requestId !== 'number' || !Number.isSafeInteger(message.requestId)) return undefined
+  return { type: message.type, requestId: message.requestId }
+}
+
+/** True for a message shaped like a range request, valid or not. */
+export function isWindowsRangeLikeRequest(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false
+  const message = value as { type?: unknown }
+  return message.type === 'terminate-range' || message.type === 'verify-range'
+}
+
 export interface RangeRequest {
   readonly type: 'terminate-range' | 'verify-range'
   readonly requestId: number
