@@ -37,7 +37,8 @@ import z from '@deepseek-ai/schemastery'
 import { SandboxProvider, SandboxUnavailableError, SandboxUnsupportedPolicyError, canonicalPath } from '@deepseek-ai/dsh-sandbox'
 import type { ConfinedArgv, ConfinedSandboxMode, RunnerFailureRule, SandboxEnforcement, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { AclWriteGrant, assertTempRootOutsideWorkspace, registerAclDiagnosisSkill, tempWriteSid, workspaceWriteSid } from '@deepseek-ai/dsh-sandbox-windows-acl'
+import { AclWriteGrant, ResidueLedger, assertTempRootOutsideWorkspace, registerAclDiagnosisSkill, tempWriteSid, workspaceWriteSid } from '@deepseek-ai/dsh-sandbox-windows-acl'
+import type { ResidueEntry } from '@deepseek-ai/dsh-sandbox-windows-acl'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { bwrapProfileArgs, landlockProfileArgs, seatbeltProfileArgs } from './profiles.ts'
 
@@ -274,6 +275,8 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   private readonly workspaceGrants = new Map<string, AclWriteGrant>()
   private readonly tempCapabilities = new Map<string, AclTempCapability>()
+  /** Residues this provider could not confirm released (never auto-cleared). */
+  private readonly ledger = new ResidueLedger()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -305,9 +308,7 @@ export class LocalSandboxProvider extends SandboxProvider {
     // shutdown leaves no temp ACEs behind (workspace ACEs stand by design —
     // the reuse cache; an unclean shutdown leaves them for the next
     // provision's exact-ACE skip).
-    ctx.effect(() => () => {
-      this.revokeAclGrants()
-    })
+    ctx.effect(() => () => this.revokeAclGrants())
   }
 
   /**
@@ -407,7 +408,7 @@ export class LocalSandboxProvider extends SandboxProvider {
     assertTempRootOutsideWorkspace(workspaceRoot, tmpdir())
     const writeSid = workspaceWriteSid(workspaceRoot)
     if (!this.workspaceGrants.has(workspaceRoot)) {
-      const grant = AclWriteGrant.create(writeSid)
+      const grant = AclWriteGrant.create(writeSid, undefined, this.ledger)
       try {
         grant.add(workspaceRoot, true)
       } catch (error) {
@@ -430,7 +431,7 @@ export class LocalSandboxProvider extends SandboxProvider {
     const tempSid = tempWriteSid(tempDir)
     let grant: AclWriteGrant | undefined
     try {
-      grant = AclWriteGrant.create(tempSid)
+      grant = AclWriteGrant.create(tempSid, undefined, this.ledger)
       grant.add(tempDir)
     } catch (error) {
       const cleanupFailures: unknown[] = []
@@ -465,25 +466,34 @@ export class LocalSandboxProvider extends SandboxProvider {
    * of it, but a new provider never reuses the residue's random path or SID;
    * OS temp hygiene (or manual removal) eventually reclaims it.
    */
-  private revokeAclGrants(): void {
+  /** Residue entries this provider still owns (unconfirmed releases only). */
+  get residues(): readonly ResidueEntry[] {
+    return this.ledger.open()
+  }
+
+  private async revokeAclGrants(): Promise<void> {
     if (this.workspaceGrants.size === 0 && this.tempCapabilities.size === 0) return
     const failures: unknown[] = []
-    for (const grant of [...this.workspaceGrants.values(), ...[...this.tempCapabilities.values()].map(capability => capability.grant)]) {
+    for (const [workspaceRoot, grant] of [...this.workspaceGrants]) {
       try {
-        grant.dispose()
+        await grant.dispose()
+        this.workspaceGrants.delete(workspaceRoot)
       } catch (error) {
         failures.push(error)
+        this.ledger.annotate(`grant:${grant.writeSid}`, { workspaceRoot })
       }
     }
-    for (const { dir } of this.tempCapabilities.values()) {
+    for (const [key, capability] of [...this.tempCapabilities]) {
       try {
-        this.removeTempDir(dir)
+        await capability.grant.dispose()
+        this.removeTempDir(capability.dir)
+        this.tempCapabilities.delete(key)
       } catch (error) {
         failures.push(error)
+        const [sessionId, workspaceRoot] = JSON.parse(key) as [string, string]
+        this.ledger.annotate(`grant:${capability.writeSid}`, { sessionId, workspaceRoot })
       }
     }
-    this.workspaceGrants.clear()
-    this.tempCapabilities.clear()
     if (failures.length > 0) {
       this.ctx.logger.warn(`sandbox-local: windows-acl grant cleanup completed with ${failures.length} failure(s)`)
       for (const error of failures) this.ctx.logger.warn(error)

@@ -16,6 +16,7 @@ import { grantWrite, revokeWrite } from './acl.ts'
 import { allocPtrSlot, decodePtr, isNullPtr, throwLastError, win32Sync } from './ffi.ts'
 import type { NativePtr, Win32Bindings } from './ffi.ts'
 import { makeWellKnownSid } from './token.ts'
+import type { ResidueLedger } from './residue-ledger.ts'
 import * as abi from './win32-abi.ts'
 
 /**
@@ -51,6 +52,8 @@ export class AclWriteGrant {
   private lowLabelSidPtr: NativePtr | null
   private worldSidPtr: NativePtr | null
   private readonly revocablePaths: string[] = []
+  /** Paths whose ACE removal this grant already confirmed (historical evidence). */
+  private readonly removedPaths: string[] = []
   private readonly standingPaths: string[] = []
   /** Dispose state machine: only a successful release reaches `disposed`. */
   private state: GrantDisposeState = 'active'
@@ -58,6 +61,8 @@ export class AclWriteGrant {
   private settlement: Promise<void> | undefined
   /** Failures of the last dispose attempt (kept for the residue ledger). */
   private failures: readonly unknown[] = []
+  /** Optional residue ledger: records only what is NOT confirmed released. */
+  private readonly ledger: ResidueLedger | undefined
 
   private constructor(
     api: Win32Bindings,
@@ -65,12 +70,14 @@ export class AclWriteGrant {
     lowLabelSidPtr: NativePtr,
     worldSidPtr: NativePtr,
     writeSid: string,
+    ledger?: ResidueLedger,
   ) {
     this.api = api
     this.sidPtr = sidPtr
     this.lowLabelSidPtr = lowLabelSidPtr
     this.worldSidPtr = worldSidPtr
     this.writeSid = writeSid
+    this.ledger = ledger
   }
 
   /**
@@ -82,7 +89,7 @@ export class AclWriteGrant {
    * @param api - optional already-resolved bindings (tests).
    * @returns the ready grant (no ACEs yet).
    */
-  static create(writeSid: string, api?: Win32Bindings): AclWriteGrant {
+  static create(writeSid: string, api?: Win32Bindings, ledger?: ResidueLedger): AclWriteGrant {
     const bindings = api ?? win32Sync()
     const sidSlot = allocPtrSlot()
     if (bindings.convertStringSidToSidW(writeSid, sidSlot) === 0) {
@@ -94,7 +101,7 @@ export class AclWriteGrant {
       const lowLabelSidPtr = makeWellKnownSid(bindings, abi.WinLowLabelSid)
       try {
         const worldSidPtr = makeWellKnownSid(bindings, abi.WinWorldSid)
-        return new AclWriteGrant(bindings, sidPtr, lowLabelSidPtr, worldSidPtr, writeSid)
+        return new AclWriteGrant(bindings, sidPtr, lowLabelSidPtr, worldSidPtr, writeSid, ledger)
       } catch (error) {
         // The Low label SID is LocalAlloc'd: release it before the world-SID
         // failure propagates to the sidPtr release below.
@@ -194,6 +201,7 @@ export class AclWriteGrant {
         revokeWrite(this.api, path, this.sidPtr!)
         const index = this.revocablePaths.indexOf(path)
         if (index >= 0) this.revocablePaths.splice(index, 1)
+        this.removedPaths.push(path)
       } catch (error) {
         failures.push(error)
       }
@@ -203,6 +211,19 @@ export class AclWriteGrant {
       // unrevoked paths (the residue ledger needs them). Never free here.
       this.failures = failures
       this.state = 'failed'
+      this.ledger?.register({
+        id: `grant:${this.writeSid}`,
+        kind: 'acl-grant',
+        owner: 'AclWriteGrant',
+        paths: [...this.revocablePaths],
+        removedPaths: [...this.removedPaths],
+        sidString: this.writeSid,
+        observedAcl: 'present',
+        aceRemoved: false,
+        sidsFreed: false,
+        failures,
+        observation: 'revoke failed; SID allocations retained for retry',
+      })
       throw new AggregateError(failures, `AclWriteGrant dispose completed with ${failures.length} cleanup failure(s)`)
     }
     const freeOne = (label: string, sidPtr: NativePtr | null, clear: () => void): void => {
@@ -221,8 +242,36 @@ export class AclWriteGrant {
     this.failures = failures
     if (failures.length > 0) {
       this.state = 'failed'
+      this.ledger?.register({
+        id: `grant:${this.writeSid}`,
+        kind: 'acl-grant',
+        owner: 'AclWriteGrant',
+        paths: [],
+        removedPaths: [...this.removedPaths],
+        sidString: this.writeSid,
+        observedAcl: 'absent',
+        aceRemoved: true,
+        sidsFreed: false,
+        failures,
+        observation: 'ACE removed but SID release failed',
+      })
       throw new AggregateError(failures, `AclWriteGrant dispose completed with ${failures.length} cleanup failure(s)`)
     }
     this.state = 'disposed'
+    if (this.ledger?.has(`grant:${this.writeSid}`) === true) {
+      this.ledger.register({
+        id: `grant:${this.writeSid}`,
+        kind: 'acl-grant',
+        owner: 'AclWriteGrant',
+        paths: [],
+        removedPaths: [...this.removedPaths],
+        sidString: this.writeSid,
+        observedAcl: 'absent',
+        aceRemoved: true,
+        sidsFreed: true,
+        observation: 'retry completed: ACE removed and SIDs released',
+      })
+      this.ledger.close(`grant:${this.writeSid}`)
+    }
   }
 }

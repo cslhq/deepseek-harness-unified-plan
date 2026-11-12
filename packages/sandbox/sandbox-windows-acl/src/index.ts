@@ -59,6 +59,9 @@ export { AclWriteGrant } from './grant.ts'
 export { assertTempRootOutsideWorkspace } from './path-boundary.ts'
 export { tempWriteSid, workspaceWriteSid } from './workspace-sid.ts'
 export { ACL_DIAGNOSIS_SKILL, registerAclDiagnosisSkill } from './acl-skill.ts'
+import type { ResidueLedger } from './residue-ledger.ts'
+export { ResidueLedger } from './residue-ledger.ts'
+export type { ResidueEntry, ResidueInput, ResidueKind, ResidueState } from './residue-ledger.ts'
 /** Construction options: the workspace/temp allowlists and their distinct SID identities. */
 export interface AclSandboxOptions {
   /** Directories the confined child may write into (must exist and be caller-owned). */
@@ -92,6 +95,11 @@ export interface AclSandboxOptions {
    * boundary; this typed seam trusts the union.
    */
   mode: 'read-only' | 'workspace-write'
+  /**
+   * Optional residue ledger. Only resources whose release is NOT confirmed are
+   * recorded; a successful dispose leaves no entry.
+   */
+  ledger?: ResidueLedger
   /**
    * Whether this instance owns its DACL grants (default true). False means
    * the CALLER has already materialized the ACEs (the sandbox seam's
@@ -179,6 +187,12 @@ export class AclSandbox {
   /** The well-known/logon SID allocations init() makes; freed by dispose() alongside the write SIDs. */
   private sidAllocations: NativePtr[] = []
   private grantedPaths: Array<{ path: string; sidPtr: NativePtr }> = []
+  /** Paths whose ACE removal this instance already confirmed. */
+  private removedPaths: string[] = []
+  /** Optional residue ledger; see {@link AclSandboxOptions.ledger}. */
+  private readonly ledger: ResidueLedger | undefined
+  /** Stable identity for residue entries across retries of this instance. */
+  private readonly residueId: string
 
   constructor(options: AclSandboxOptions) {
     this.mode = options.mode
@@ -193,6 +207,8 @@ export class AclSandbox {
     this.tempDirOption = options.tempDir
     this.writeSid = options.writeSid
     this.tempWriteSid = options.tempWriteSid
+    this.ledger = options.ledger
+    this.residueId = `sandbox:${options.mode}:${options.writeSid ?? 'none'}:${options.tempDir ?? 'none'}`
     if (this.mode === 'workspace-write' && this.writeSid === undefined) {
       throw new Error('AclSandbox workspace-write requires a write SID — derive it from the workspace via workspaceWriteSid()')
     }
@@ -411,13 +427,36 @@ export class AclSandbox {
     if (api === undefined) return
     const failures: unknown[] = []
     if (this.manageDacls) {
-      for (const grant of this.grantedPaths) {
+      for (const grant of [...this.grantedPaths]) {
         try {
           revokeWrite(api, grant.path, grant.sidPtr)
+          const index = this.grantedPaths.indexOf(grant)
+          if (index >= 0) this.grantedPaths.splice(index, 1)
+          this.removedPaths.push(grant.path)
         } catch (error) {
           failures.push(error)
         }
       }
+    }
+    if (failures.length > 0) {
+      // Never free a SID that a surviving ACE still references, and never drop
+      // the record: the instance keeps the token, the SIDs and the paths so a
+      // retry can finish (and the ledger keeps the fact visible until then).
+      this.ledger?.register({
+        id: this.residueId,
+        kind: 'acl-sandbox',
+        owner: 'AclSandbox',
+        workspaceRoot: this.writableDirs[0],
+        paths: this.grantedPaths.map((grant) => grant.path),
+        removedPaths: [...this.removedPaths],
+        sidString: this.tempWriteSid ?? this.writeSid,
+        observedAcl: 'present',
+        aceRemoved: false,
+        sidsFreed: false,
+        failures,
+        observation: 'revoke failed; restricted token and SIDs retained for retry',
+      })
+      throw new AggregateError(failures, `AclSandbox dispose completed with ${failures.length} cleanup failure(s)`)
     }
     for (const [label, sidPtr] of [['workspace write SID', this.writeSidPtr], ['temp write SID', this.tempWriteSidPtr]] as const) {
       freeSidBestEffort(api, sidPtr, label, failures)
@@ -441,7 +480,36 @@ export class AclSandbox {
     this.tempWriteSidPtr = undefined
     this.grantedPaths = []
     if (failures.length > 0) {
+      this.ledger?.register({
+        id: this.residueId,
+        kind: 'acl-sandbox',
+        owner: 'AclSandbox',
+        workspaceRoot: this.writableDirs[0],
+        paths: [],
+        removedPaths: [...this.removedPaths],
+        sidString: this.tempWriteSid ?? this.writeSid,
+        observedAcl: 'absent',
+        aceRemoved: true,
+        sidsFreed: false,
+        failures,
+        observation: 'ACEs removed but a SID/token release failed',
+      })
       throw new AggregateError(failures, `AclSandbox dispose completed with ${failures.length} cleanup failure(s)`)
+    }
+    if (this.ledger?.has(this.residueId) === true) {
+      this.ledger.register({
+        id: this.residueId,
+        kind: 'acl-sandbox',
+        owner: 'AclSandbox',
+        paths: [],
+        removedPaths: [...this.removedPaths],
+        sidString: this.tempWriteSid ?? this.writeSid,
+        observedAcl: 'absent',
+        aceRemoved: true,
+        sidsFreed: true,
+        observation: 'retry completed: ACEs removed and native resources released',
+      })
+      this.ledger.close(this.residueId)
     }
   }
 }
