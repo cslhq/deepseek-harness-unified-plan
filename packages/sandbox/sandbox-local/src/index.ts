@@ -41,6 +41,8 @@ import { AclWriteGrant, ResidueLedger, assertTempRootOutsideWorkspace, registerA
 import type { ResidueEntry } from '@deepseek-ai/dsh-sandbox-windows-acl'
 import { ResourceLeaseRegistry } from './lease.ts'
 import type { Lease, LeaseOutcome } from './lease.ts'
+import { QuarantineStore } from './quarantine.ts'
+import { windowsQuarantineIo } from './quarantine-io.ts'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { bwrapProfileArgs, landlockProfileArgs, seatbeltProfileArgs } from './profiles.ts'
 
@@ -56,6 +58,11 @@ export interface Config {
    * when `error.path` is absent and `error.syscall` is exactly `spawn <runner>`.
    */
   runnerCommand?: string[]
+  /**
+   * Durable quarantine registry file (D5-R1). Absent keeps an in-memory gate
+   * for this process only; it never silently disables the gate.
+   */
+  quarantineFile?: string
   /**
    * Case-insensitive stderr substrings emitted when a configured
    * {@link runnerCommand} refuses its profile before executing the wrapped
@@ -258,6 +265,8 @@ export class LocalSandboxProvider extends SandboxProvider {
     runnerCommand: z.array(z.string()).default([]),
     runnerFailureSignatures: z.array(z.string()).default([]),
     probeTimeoutMs: z.natural().default(5_000),
+    /** Durable quarantine registry path; empty keeps the process-local gate. */
+    quarantineFile: z.string().default(''),
   })
 
   /** Test hook (mirrors the bash executors' `internals`). */
@@ -285,9 +294,23 @@ export class LocalSandboxProvider extends SandboxProvider {
   private readonly pendingCleanup = new Set<Promise<unknown>>()
   /** residueId → temp dir whose removal failed after a confirmed revoke. */
   private readonly pendingTempDirDeletion = new Map<string, string>()
+  /** Durable quarantine: a quarantined identity never re-enters ACTIVE. */
+  private readonly quarantine: QuarantineStore
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
+    // Load the registry BEFORE anything can materialize a capability: a corrupt
+    // or unreadable file must fail closed, not start empty and look healthy.
+    const quarantineFile = config.quarantineFile as string | undefined
+    const quarantinePath = quarantineFile === undefined || quarantineFile === '' ? undefined : quarantineFile
+    this.quarantine = quarantinePath === undefined
+      ? new QuarantineStore()
+      : QuarantineStore.load({ file: quarantinePath, io: windowsQuarantineIo(quarantinePath) })
+    if (quarantinePath === undefined) {
+      ctx.logger.warn('sandbox-local: quarantineFile is not configured; quarantine is process-local and will not survive a restart')
+    } else if (this.quarantine.integrity !== 'ok') {
+      ctx.logger.warn(`sandbox-local: quarantine registry is ${this.quarantine.integrity} (${this.quarantine.corruption ?? 'no diagnostics'}); all managed acquires are refused`)
+    }
     // The schema (static Config) defaults every field — the casts record
     // those runtime facts. An empty runnerCommand means "not configured":
     // use the platform chain.
@@ -415,6 +438,9 @@ export class LocalSandboxProvider extends SandboxProvider {
   private materializeAclGrant(sessionId: SessionId, workspaceRoot: string): AclTempCapability {
     assertTempRootOutsideWorkspace(workspaceRoot, tmpdir())
     const writeSid = workspaceWriteSid(workspaceRoot)
+    // Fail-closed gate: a corrupted registry or a quarantined identity refuses
+    // the capability before any ACE is materialized.
+    this.quarantine.assertAcquireAllowed(`grant:${writeSid}`)
     if (!this.workspaceGrants.has(workspaceRoot)) {
       const grant = AclWriteGrant.create(writeSid, undefined, this.ledger)
       try {
