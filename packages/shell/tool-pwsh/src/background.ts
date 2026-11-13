@@ -8,7 +8,8 @@
 
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { escalationHintMarker, sandboxDenialMarker } from '@deepseek-ai/dsh-sandbox'
-import type { ShellProcess, ShellSandboxInfo } from '@deepseek-ai/dsh-shell'
+import { settleManagedRange } from '@deepseek-ai/dsh-shell'
+import type { ManagedRangeSettlement, ShellProcess, ShellSandboxInfo } from '@deepseek-ai/dsh-shell'
 import type { JobChunk, JobHooks, JobOutcome, JobOutputSource } from '@deepseek-ai/dsh-jobs'
 
 /* jscpd:ignore-start -- deliberate twin of dsh-tool-bash/background.ts (Agent Note). */
@@ -43,7 +44,11 @@ function sandboxNotes(sandbox: ShellSandboxInfo | undefined, escalationModes: re
  * @param escalationModes - escalation targets advertised by this composition.
  * @returns the outcome for the `ctx.jobs` registration.
  */
-export function processOutcome(proc: ShellProcess, escalationModes: readonly SandboxMode[] = []): JobOutcome {
+export function processOutcome(
+  proc: ShellProcess,
+  escalationModes: readonly SandboxMode[] = [],
+  settlement?: ManagedRangeSettlement,
+): JobOutcome {
   // TODO(background-infrastructure-outcome): widen ShellProcess with an explicit
   // infrastructure-failure outcome, then map spawn failures and
   // sandbox.runnerFailed to job `failed`. The current contract aliases a spawn
@@ -53,7 +58,16 @@ export function processOutcome(proc: ShellProcess, escalationModes: readonly San
     ? { status: 'killed', detail: proc.signal !== null ? `signal: ${proc.signal}` : 'killed before exit' }
     : { status: 'completed', detail: `exit code: ${proc.exitCode ?? 0}` }
   const notes = sandboxNotes(proc.sandbox, escalationModes)
-  return notes.length === 0 ? base : { ...base, detail: `${base.detail}; ${notes.join(' ')}` }
+  const projected = notes.length === 0 ? base : { ...base, detail: `${base.detail}; ${notes.join(' ')}` }
+  // A settled direct process never proves the managed range empty: only an
+  // observed range may report a terminal job outcome.
+  if (settlement?.state === 'residue') {
+    return {
+      status: 'failed',
+      detail: `${projected.detail ?? base.detail}; managed process range not proven empty (${settlement.evidence.join(', ')})`,
+    }
+  }
+  return projected
 }
 
 /**
@@ -100,7 +114,7 @@ export function ringDelta(chunks: readonly JobChunk[]): string {
  */
 export function processJob(
   start: (signal: AbortSignal) => Promise<ShellProcess>,
-  outcome: (process: ShellProcess) => JobOutcome,
+  outcome: (process: ShellProcess, settlement: ManagedRangeSettlement) => JobOutcome,
 ): JobHooks {
   const controller = new AbortController()
   let process: ShellProcess | undefined
@@ -112,7 +126,10 @@ export function processJob(
       } finally {
         await process.done
       }
-      return outcome(process)
+      // Direct settlement is not range settlement: prove the managed range
+      // empty (terminating only what is still live) before reporting the job.
+      const settlement = await settleManagedRange(process)
+      return outcome(process, settlement)
     } catch (error: unknown) {
       return {
         status: controller.signal.aborted && process === undefined ? 'killed' : 'failed',

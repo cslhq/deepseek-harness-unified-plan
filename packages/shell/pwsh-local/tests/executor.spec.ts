@@ -661,21 +661,25 @@ describe.skipIf(!hasPwsh)('PwshLocalExecutor.start (background process handles)'
     expect(lf(read.delta)).toContain('[stderr]')
   })
 
-  it('kill() requests managed-range termination: true once, false after settlement', async () => {
+  it('kill() reports whether a termination request was accepted, before and after settlement', async () => {
     const { bash } = await setup()
     const proc = (await start(bash, bash.resolve({ command: 'Start-Sleep -Seconds 60' })))
     expect(proc.kill()).toBe(true)
     await proc.done
     expect(proc.status).toBe('killed')
-    expect(proc.kill()).toBe(false)
+    // A settled direct process does not prove the managed range empty: the Job
+    // provider accepts a range-termination request (true), a provider without a
+    // managed range has none to request (false). Neither result claims the range
+    // is empty or that anything was terminated.
+    expect(proc.kill()).toBe(process.platform === 'win32')
   })
 
-  it('kill() returns false for a naturally completed process', async () => {
+  it('kill() reports no accepted request for a naturally completed process without a managed range', async () => {
     const { bash } = await setup()
     const proc = (await start(bash, bash.resolve({ command: 'Write-Output ok' })))
     await proc.done
     expect(proc.status).toBe('completed')
-    expect(proc.kill()).toBe(false)
+    expect(proc.kill()).toBe(process.platform === 'win32')
   })
 
   it('a spec.signal abort settles the handle as killed, not completed', async () => {

@@ -278,7 +278,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               proc = await ctx.shell.execute({ ...spec, signal })
               return proc
             },
-            started => processOutcome(started, escalationModes),
+            (started, settlement) => processOutcome(started, escalationModes, settlement),
           )
           return {
             done: hooks.done,
