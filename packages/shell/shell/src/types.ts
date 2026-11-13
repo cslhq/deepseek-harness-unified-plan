@@ -218,6 +218,16 @@ export interface ShellProcess {
    */
   kill(): boolean
   /**
+   * Terminate whatever the managed range still holds. Independent of
+   * {@link done} and {@link waitForExit}: it only requests termination.
+   */
+  terminateRange?(): Promise<ShellRangeAnswer> | undefined
+  /**
+   * Re-observe the managed range without terminating anything. A provider that
+   * cannot answer for the exact runner identity reports `unknown`; an
+   * unprovable answer is never reported as empty. */
+  verifyRange?(): Promise<ShellRangeAnswer> | undefined
+  /**
    * Wait for the provider-managed process range (the Windows Job) to empty
    * without settling {@link done}: `done` tracks the direct process only, so a
    * descendant that outlives it keeps the range alive past `done`.
@@ -231,6 +241,14 @@ export interface ShellProcess {
    *   rejects when the provider cannot observe the range, or observation fails.
    */
   waitForExit(signal?: AbortSignal): Promise<boolean>
+}
+
+/** Provider answer for one managed-range request. */
+export interface ShellRangeAnswer {
+  /** Trusted terminal answers are `empty` and `terminated`; the rest prove nothing. */
+  readonly state: 'terminated' | 'empty' | 'partial' | 'unknown'
+  /** Provider evidence, carried through unchanged for diagnostics. */
+  readonly evidence: readonly string[]
 }
 
 /**

@@ -1,6 +1,14 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { ShellProcess } from '@deepseek-ai/dsh-shell'
 import { processJob, processOutcome, processSources } from '../src/background.ts'
+import type { ManagedRangeSettlement } from '@deepseek-ai/dsh-shell'
+import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+
+/** Job outcome adapter: these cases assert the pre-settlement projection. */
+const jobOutcome = (
+  proc: Parameters<typeof processOutcome>[0],
+  settlement: ManagedRangeSettlement,
+): JobOutcome => processOutcome(proc, [], settlement)
 
 function processHandle() {
   const exited = Promise.withResolvers<undefined>()
@@ -35,8 +43,8 @@ describe('background job ownership during asynchronous shell startup', () => {
     const prepared = Promise.withResolvers<ShellProcess>()
     let published: ShellProcess | undefined
     const source = processSources(() => published)[0]!
-    const outcome = vi.fn(processOutcome)
-    const hooks = processJob(async () => { published = await prepared.promise; return published }, outcome)
+    const outcome = vi.fn(jobOutcome)
+    const hooks = processJob(async () => { published = await prepared.promise; return published }, jobOutcome)
     expect(source.read(0).text).toBe('')
     expect(outcome).not.toHaveBeenCalled()
     prepared.resolve(child.process)
@@ -57,7 +65,7 @@ describe('background job ownership during asynchronous shell startup', () => {
       return new Promise<ShellProcess>((_resolve, reject) => {
         signal.addEventListener('abort', () => { reject(new Error(String(signal.reason))) }, { once: true })
       })
-    }, processOutcome)
+    }, jobOutcome)
     expect(received?.aborted).toBe(false)
     hooks.cancel('cancel pending confinement')
     hooks.cancel('later cancellation')
@@ -68,7 +76,7 @@ describe('background job ownership during asynchronous shell startup', () => {
   it('kills a process that materializes after cancellation and awaits its exit', async () => {
     const child = processHandle()
     const prepared = Promise.withResolvers<ShellProcess>()
-    const hooks = processJob(() => prepared.promise, processOutcome)
+    const hooks = processJob(() => prepared.promise, jobOutcome)
     let settled = false
     void hooks.done.then(() => { settled = true })
     hooks.cancel('cancel before process publication')
@@ -82,7 +90,7 @@ describe('background job ownership during asynchronous shell startup', () => {
 
   it('cancels a published process once and keeps done pending until exit', async () => {
     const child = processHandle()
-    const hooks = processJob(async () => child.process, processOutcome)
+    const hooks = processJob(async () => child.process, jobOutcome)
     await Promise.resolve()
     let settled = false
     void hooks.done.then(() => { settled = true })
@@ -100,7 +108,7 @@ describe('background job ownership during asynchronous shell startup', () => {
     const attempted = Promise.withResolvers<undefined>()
     vi.mocked(child.kill).mockImplementation(() => { attempted.resolve(undefined); throw new Error('termination failed') })
     const prepared = Promise.withResolvers<ShellProcess>()
-    const hooks = processJob(() => prepared.promise, processOutcome)
+    const hooks = processJob(() => prepared.promise, jobOutcome)
     let settled = false
     void hooks.done.then(() => { settled = true })
     hooks.cancel('stop before publication')
@@ -112,7 +120,7 @@ describe('background job ownership during asynchronous shell startup', () => {
   })
 
   it('reports a startup failure through job completion without publishing output', async () => {
-    const render = vi.fn(processOutcome)
+    const render = vi.fn(jobOutcome)
     const hooks = processJob(async () => { throw new Error('remote sandbox unavailable') }, render)
     expect(await hooks.done).toEqual({ status: 'failed', detail: 'remote sandbox unavailable' })
     expect(render).not.toHaveBeenCalled()
@@ -121,7 +129,7 @@ describe('background job ownership during asynchronous shell startup', () => {
   it('reports a primitive upstream abort reason as a failed startup', async () => {
     const upstream = new AbortController()
     upstream.abort('upstream preparation stopped')
-    const hooks = processJob(async () => { upstream.signal.throwIfAborted(); throw new Error('unreachable') }, processOutcome)
+    const hooks = processJob(async () => { upstream.signal.throwIfAborted(); throw new Error('unreachable') }, jobOutcome)
     expect(await hooks.done).toEqual({ status: 'failed', detail: 'upstream preparation stopped' })
   })
 })

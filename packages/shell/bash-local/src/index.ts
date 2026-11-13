@@ -13,6 +13,7 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { ShellExecutor, waitForManagedRange } from '@deepseek-ai/dsh-shell'
+import type { ShellRangeAnswer } from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellExecution, ShellProcess, ShellProcessRead, ShellRunResult, CollectedOutput } from '@deepseek-ai/dsh-shell'
 import type { SubprocessCollect, SubprocessHandle, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { clampTimeout, deadline, MAX_TIMER_DELAY_MS, timeoutOf } from '@deepseek-ai/dsh-timeout'
@@ -363,11 +364,20 @@ export class LocalBashExecutor extends ShellExecutor {
         }
       },
       kill: (): boolean => {
-        if (proc.status !== 'running') return false
-        proc.status = 'killed'
-        running?.terminate()
+        if (proc.status === 'running') {
+          proc.status = 'killed'
+          running?.terminate()
+          return true
+        }
+        // Direct process settled: the managed range may still hold members, so
+        // request termination there instead of reporting the kill as failed.
+        const termination = requestRange(running, 'terminateRange')
+        if (termination === undefined) return false
+        void termination.catch(() => {})
         return true
       },
+      terminateRange: (): Promise<ShellRangeAnswer> | undefined => requestRange(running, 'terminateRange'),
+      verifyRange: (): Promise<ShellRangeAnswer> | undefined => requestRange(running, 'verifyRange'),
       result: (): Promise<ShellRunResult> => {
         resultPromise ??= proc.done.then(() => {
           // Infrastructure-failure parity with the historical foreground path:
@@ -403,3 +413,37 @@ export class LocalBashExecutor extends ShellExecutor {
 }
 
 export default LocalBashExecutor
+
+/**
+ * Probe the provider handle for one managed-range operation.
+ *
+ * The subprocess seam does not declare the range operations, so the capability
+ * is probed structurally: a provider without them reports unsupported
+ * (`undefined`) instead of failing the kill path.
+ * @param running - provider handle, when one was created.
+ * @param operation - range operation to invoke.
+ * @returns the normalized answer, or undefined when the provider lacks it.
+ */
+function requestRange(
+  running: unknown,
+  operation: 'terminateRange' | 'verifyRange',
+): Promise<ShellRangeAnswer> | undefined {
+  if (running === null || typeof running !== 'object') return undefined
+  const candidate = (running as Record<string, unknown>)[operation]
+  if (typeof candidate !== 'function') return undefined
+  return (candidate as () => Promise<unknown>).call(running).then(normalizeRangeAnswer)
+}
+
+/**
+ * Normalize a provider range answer; an unrecognized shape proves nothing.
+ * @param value - raw provider reply.
+ * @returns a well-formed answer, defaulting to `unknown`.
+ */
+function normalizeRangeAnswer(value: unknown): ShellRangeAnswer {
+  const answer = (value ?? {}) as { state?: unknown; evidence?: unknown }
+  const state = answer.state
+  return {
+    state: state === 'terminated' || state === 'empty' || state === 'partial' || state === 'unknown' ? state : 'unknown',
+    evidence: Array.isArray(answer.evidence) ? answer.evidence.map(String) : [],
+  }
+}

@@ -7,7 +7,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
-import type { ShellExecRequest, ShellExecSpec, ShellExecution } from './types.ts'
+import type { ShellExecRequest, ShellExecSpec, ShellExecution, ShellProcess } from './types.ts'
 
 export { DSH_ENV_PREFIX } from './types.ts'
 export type {
@@ -116,16 +116,94 @@ export function waitForManagedRange(
   try {
     observation = Promise.resolve(observe.call(running))
   } catch (error) {
-    return Promise.reject(error)
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)))
   }
   if (signal === undefined) return observation.then(() => true)
   if (signal.aborted) return Promise.resolve(false)
   return new Promise<boolean>((resolve, reject) => {
-    const cleanup = (): void => signal.removeEventListener('abort', onAbort)
+    const cleanup = (): void => { signal.removeEventListener('abort', onAbort) }
     const onAbort = (): void => { cleanup(); resolve(false) }
     signal.addEventListener('abort', onAbort, { once: true })
-    observation.then(() => { cleanup(); resolve(true) }, (error: unknown) => { cleanup(); reject(error) })
+    observation.then(
+      () => { cleanup(); resolve(true) },
+      (error: unknown) => { cleanup(); reject(error instanceof Error ? error : new Error(String(error))) },
+    )
   })
+}
+
+/** Provider answer for one managed-range request. */
+export type { ShellRangeAnswer } from './types.ts'
+
+/** Outcome of one product-level managed-range settlement. */
+export interface ManagedRangeSettlement {
+  /** `drained` only when the range was proven empty; everything else is residue. */
+  readonly state: 'drained' | 'residue'
+  /** Observation, termination, and the final proof, in call order. */
+  readonly evidence: readonly string[]
+}
+
+/** Default bound for one settlement's final range proof. */
+export const MANAGED_RANGE_SETTLE_TIMEOUT_MS = 5_000
+
+/**
+ * Bring one shell process's managed range to a proven state.
+ *
+ * This is the product teardown policy in one place, shared by every dialect:
+ * observe first (a range that already proves empty is never asked to
+ * terminate), request termination only when the range is still live or
+ * unprovable, then wait for the range to empty. Anything short of a proven
+ * empty range is `residue`: an aborted wait, a rejected observation, a
+ * timeout, or an `unknown`/`partial` answer never becomes `drained`.
+ * @param process - shell process whose managed range must be released.
+ * @param options - bound for the final range proof.
+ * @returns the proven state and the evidence trail, in call order.
+ */
+export async function settleManagedRange(
+  process: ShellProcess,
+  options: { timeoutMs?: number; probeMs?: number } = {},
+): Promise<ManagedRangeSettlement> {
+  const evidence: string[] = []
+  // Fast path: the overwhelmingly common case is a range that already emptied
+  // with its direct process. Probing first avoids sending range requests — and
+  // therefore any termination — for a range that needs none.
+  try {
+    if (await process.waitForExit(AbortSignal.timeout(options.probeMs ?? 250))) {
+      return { state: 'drained', evidence: ['probe-empty:true'] }
+    }
+    evidence.push('probe-empty:false')
+  } catch (error) {
+    evidence.push(`probe-empty-failed:${String(error)}`)
+  }
+  let observed: { state: string } | undefined
+  if (process.verifyRange !== undefined) {
+    try {
+      const answer = await process.verifyRange()
+      if (answer !== undefined) {
+        observed = answer
+        evidence.push(`verify:${answer.state}`)
+      }
+    } catch (error) {
+      evidence.push(`verify-failed:${String(error)}`)
+    }
+  }
+  if (observed?.state !== 'empty' && observed?.state !== 'terminated' && process.terminateRange !== undefined) {
+    try {
+      const termination = await process.terminateRange()
+      evidence.push(`terminate:${termination?.state ?? 'unsupported'}`)
+    } catch (error) {
+      evidence.push(`terminate-failed:${String(error)}`)
+    }
+  }
+  try {
+    const empty = await process.waitForExit(
+      AbortSignal.timeout(options.timeoutMs ?? MANAGED_RANGE_SETTLE_TIMEOUT_MS),
+    )
+    evidence.push(`range-empty:${String(empty)}`)
+    return { state: empty ? 'drained' : 'residue', evidence }
+  } catch (error) {
+    evidence.push(`range-observe-failed:${String(error)}`)
+    return { state: 'residue', evidence }
+  }
 }
 
 export default ShellExecutor
