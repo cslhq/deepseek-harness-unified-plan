@@ -26,6 +26,7 @@ class StubExecutor extends ShellExecutor {
   }
 
   async execute(spec: ShellExecSpec): Promise<ShellExecution> {
+    const rangeEmptied = Promise.withResolvers<undefined>()
     const proc: ShellExecution = {
       status: 'running',
       exitCode: null,
@@ -36,8 +37,13 @@ class StubExecutor extends ShellExecutor {
       kill: (): boolean => {
         if (proc.status !== 'running') return false
         proc.status = 'killed'
+        rangeEmptied.resolve(undefined)
         return true
       },
+      // This stub's managed range is its own process, so it empties on kill.
+      waitForExit: (signal?: AbortSignal): Promise<boolean> => signal?.aborted === true
+        ? Promise.resolve(false)
+        : rangeEmptied.promise.then(() => true),
       result: () => Promise.resolve({
         exitCode: 0,
         signal: null,

@@ -43,6 +43,10 @@ function observableProcess(streams: { stdout: { text: string }; stderr: { text: 
     readOutput: () => ({ delta: '', lossy: false }),
     kill: () => false,
     observed: { stdout: scriptedReader(streams.stdout), stderr: scriptedReader(streams.stderr) },
+    // The range empties when this fake finishes.
+    waitForExit: (signal?: AbortSignal) => signal?.aborted === true
+      ? Promise.resolve(false)
+      : done.then(() => true),
   }
   return {
     proc,
@@ -170,6 +174,10 @@ describe('background pwsh output', () => {
         stdout: { readFrom() { throw new Error('reader boom') } },
         stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
       },
+      // The range empties when this fake finishes.
+      waitForExit: (signal?: AbortSignal) => signal?.aborted === true
+        ? Promise.resolve(false)
+        : done.then(() => true),
     }
     pwsh.backgroundHandler = () => proc
     await call(ctx, { command: 'Get-Broken', description: 'test command', run_in_background: true })
@@ -259,6 +267,10 @@ describe('foreground commands as jobs (pwsh)', () => {
       done: new Promise<void>((resolve) => { resolveDone = resolve }),
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: scriptedReader({ text: partial }), stderr: scriptedReader({ text: '' }) },
+      // The range empties once this fake is killed or completes.
+      waitForExit: (signal?: AbortSignal) => signal?.aborted === true
+        ? Promise.resolve(false)
+        : proc.done.then(() => true),
       kill: () => {
         if (proc.status !== 'running') return false
         killed = true

@@ -83,6 +83,8 @@ class FakeBash extends ShellExecutor {
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: silentReader, stderr: silentReader },
       kill: () => false,
+      // The fake range is already empty; only an already-aborted wait reports false.
+      waitForExit: (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true),
       result: () => this.runError ? Promise.reject(this.runError) : Promise.resolve(this.result),
     }
   }

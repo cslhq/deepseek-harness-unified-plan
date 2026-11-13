@@ -20,6 +20,10 @@ function processHandle() {
       stdout: { readFrom: fromByte => ({ text: 'output'.slice(fromByte), nextOffset: 6, lossy: false }) },
       stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
     },
+    // The fake range empties when the job is killed or the process exits.
+    waitForExit: (signal?: AbortSignal) => signal?.aborted === true
+      ? Promise.resolve(false)
+      : Promise.race([killed.promise, exited.promise]).then(() => true),
   }
   onTestFinished(() => { exited.resolve(undefined) })
   return { process, exited, killed, kill, readOutput }

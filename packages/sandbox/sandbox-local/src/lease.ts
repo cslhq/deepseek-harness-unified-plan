@@ -98,7 +98,7 @@ interface LeaseRecord {
 export class ResourceLeaseRegistry {
   private readonly resources = new Map<string, ResourceRecord>()
   private readonly leases = new Map<string, LeaseRecord>()
-  private readonly sessions = new Map<string, { id: string; state: SessionDrainState; draining?: Promise<SessionDrainResult>; pendingResidues: Set<string> }>()
+  private readonly sessions = new Map<string, { id: string; state: SessionDrainState; draining?: Promise<SessionDrainResult> | undefined; pendingResidues: Set<string> }>()
   private sequence = 0
 
   constructor(private readonly ledger: ResidueLedger) {}

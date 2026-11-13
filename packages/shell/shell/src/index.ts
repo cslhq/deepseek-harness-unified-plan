@@ -104,7 +104,7 @@ export abstract class ShellExecutor extends Service {
  * @returns the range-observation promise.
  */
 export function waitForManagedRange(
-  running: { waitForExit?: () => Promise<void> } | undefined,
+  running: { waitForExit?: () => Promise<void | boolean> } | undefined,
   signal?: AbortSignal,
 ): Promise<boolean> {
   if (running === undefined) return Promise.resolve(true)
@@ -112,7 +112,7 @@ export function waitForManagedRange(
   if (typeof observe !== 'function') {
     return Promise.reject(new Error('shell: the subprocess provider cannot observe the managed process range'))
   }
-  let observation: Promise<void>
+  let observation: Promise<void | boolean>
   try {
     observation = Promise.resolve(observe.call(running))
   } catch (error) {

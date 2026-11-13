@@ -36,7 +36,9 @@ function execution(result: () => Promise<ShellRunResult>): ShellExecution {
   return {
     status: 'completed', exitCode: 0, signal: null, done: Promise.resolve(),
     observed: { stdout: reader, stderr: reader },
-    readOutput: () => ({ delta: '', lossy: false }), kill: () => false, result,
+    readOutput: () => ({ delta: '', lossy: false }), kill: () => false,
+    waitForExit: (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true),
+    result,
   }
 }
 

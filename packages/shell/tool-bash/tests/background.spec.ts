@@ -314,14 +314,19 @@ describe('foreground commands as jobs', () => {
   it('leaves the job listed when its process outlives the abort wait, so a later settlement still notifies', async () => {
     const ctx = await setup()
     let finish: () => void = () => {}
+    const rangeEmptied = Promise.withResolvers<undefined>()
     const stubborn: ShellExecution = {
       status: 'running',
       exitCode: null,
       signal: null,
-      done: new Promise<void>((resolve) => { finish = () => { stubborn.status = 'killed'; stubborn.signal = 'SIGKILL'; resolve() } }),
+      done: new Promise<void>((resolve) => { finish = () => { stubborn.status = 'killed'; stubborn.signal = 'SIGKILL'; resolve(); rangeEmptied.resolve(undefined) } }),
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: silentReader, stderr: silentReader },
       kill: () => true, // acknowledges the request but takes its time
+      // This stub models a range that stays non-empty until the kill lands.
+      waitForExit: (signal?: AbortSignal) => signal?.aborted === true
+        ? Promise.resolve(false)
+        : rangeEmptied.promise.then(() => true),
       result: () => Promise.reject(new Error('foreground projection unused')),
     }
     vi.spyOn(ctx.shell, 'execute').mockResolvedValue(stubborn)

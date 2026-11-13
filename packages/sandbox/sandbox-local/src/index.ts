@@ -40,7 +40,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { AclWriteGrant, ResidueLedger, assertTempRootOutsideWorkspace, registerAclDiagnosisSkill, tempWriteSid, workspaceWriteSid } from '@deepseek-ai/dsh-sandbox-windows-acl'
 import type { ResidueEntry } from '@deepseek-ai/dsh-sandbox-windows-acl'
 import { ResourceLeaseRegistry } from './lease.ts'
-import type { Lease, LeaseOutcome } from './lease.ts'
+import type { LeaseOutcome } from './lease.ts'
 import { QuarantineStore } from './quarantine.ts'
 import { windowsQuarantineIo } from './quarantine-io.ts'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
@@ -481,9 +481,12 @@ export class LocalSandboxProvider extends SandboxProvider {
     } catch (error) {
       const cleanupFailures: unknown[] = []
       if (grant !== undefined) {
-        this.trackCleanup(grant.dispose().catch((cleanupError: unknown) => {
+        // A closure cannot rely on the narrowing of a mutable binding: keep the
+        // failed grant stable while its dispose settles.
+        const failedGrant = grant
+        this.trackCleanup(failedGrant.dispose().catch((cleanupError: unknown) => {
           cleanupFailures.push(cleanupError)
-          this.ledger.annotate(`grant:${grant.writeSid}`, { sessionId: String(sessionId), workspaceRoot })
+          this.ledger.annotate(`grant:${failedGrant.writeSid}`, { sessionId: String(sessionId), workspaceRoot })
         }))
       }
       try {

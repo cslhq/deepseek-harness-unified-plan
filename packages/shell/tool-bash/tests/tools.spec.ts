@@ -165,6 +165,7 @@ class RecordingSandboxExecutor extends ShellExecutor {
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: silentReader, stderr: silentReader },
       kill: () => false,
+      waitForExit: (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true),
     }, () => Promise.resolve({
       exitCode: 0,
       signal: null,
@@ -210,6 +211,8 @@ class CountingStartExecutor extends ShellExecutor {
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: silentReader, stderr: silentReader },
       kill: () => false,
+      // No managed descendants: the range is already empty.
+      waitForExit: (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true),
     })
   }
 }
@@ -1001,6 +1004,9 @@ describe('renderJobRead', () => {
 
 describe('processOutcome', () => {
   function settled(over: Partial<ShellProcess>): ShellProcess {
+    // A settled stub has no managed descendants, so its range is empty; a caller
+    // may still override the wait to model a range that keeps members.
+    const { waitForExit = (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true), ...rest } = over
     return {
       status: 'completed',
       exitCode: 0,
@@ -1009,7 +1015,8 @@ describe('processOutcome', () => {
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: silentReader, stderr: silentReader },
       kill: () => false,
-      ...over,
+      ...rest,
+      waitForExit,
     }
   }
 
@@ -1343,6 +1350,8 @@ describe('the model-facing bash tool builds its request from named args only (no
         readOutput: () => ({ delta: '', lossy: false }),
         observed: { stdout: silentReader, stderr: silentReader },
         kill: () => false,
+        // No managed descendants: the range is already empty.
+        waitForExit: (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true),
       }, () => Promise.resolve({
         exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: spec.timeoutMs,
         stdout: { text: 'ok', truncated: false }, stderr: { text: '', truncated: false },

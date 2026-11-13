@@ -118,6 +118,8 @@ function fakeProcess(delta = 'bg-ok\n'): ShellProcess {
     done: Promise.resolve(),
     readOutput: () => ({ delta: '', lossy: false }),
     kill: () => false,
+    // No managed descendants: the range is already empty.
+    waitForExit: (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true),
     // ASCII only: the observed offsets are string indexes.
     observed: {
       stdout: { readFrom: (fromByte: number) => ({ text: delta.slice(fromByte), nextOffset: delta.length, lossy: false }) },
@@ -144,6 +146,10 @@ function killableProcess(): ShellProcess {
       resolveDone()
       return true
     },
+    // The range empties once this fake is killed.
+    waitForExit: (signal?: AbortSignal) => signal?.aborted === true
+      ? Promise.resolve(false)
+      : done.then(() => true),
   }
   return proc
 }
@@ -1195,6 +1201,9 @@ describe('renderPwshJobRead', () => {
 
 describe('processOutcome', () => {
   function settled(over: Partial<ShellProcess>): ShellProcess {
+    // A settled stub has no managed descendants, so its range is empty; a caller
+    // may still override the wait to model a range that keeps members.
+    const { waitForExit = (signal?: AbortSignal) => Promise.resolve(signal?.aborted !== true), ...rest } = over
     return {
       status: 'completed',
       exitCode: 0,
@@ -1203,7 +1212,8 @@ describe('processOutcome', () => {
       readOutput: () => ({ delta: '', lossy: false }),
       observed: { stdout: silentReader, stderr: silentReader },
       kill: () => false,
-      ...over,
+      ...rest,
+      waitForExit,
     }
   }
 

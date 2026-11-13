@@ -22,17 +22,17 @@ export interface QuarantineHistoryEntry {
   readonly at: string
   readonly action: string
   readonly outcome: string
-  readonly note?: string
+  readonly note?: string | undefined
 }
 
 export interface QuarantineRecord {
   readonly id: string
   readonly kind: string
   readonly owner: string
-  readonly sessionId?: string
-  readonly workspaceRoot?: string
+  readonly sessionId?: string | undefined
+  readonly workspaceRoot?: string | undefined
   readonly paths: readonly string[]
-  readonly sidString?: string
+  readonly sidString?: string | undefined
   readonly reason: QuarantineReason
   readonly state: QuarantineState
   /** False means a human must clear it (ownership/accounting doubt). */
@@ -40,7 +40,7 @@ export interface QuarantineRecord {
   readonly attempts: number
   readonly history: readonly QuarantineHistoryEntry[]
   readonly lastObservedAcl: QuarantineAcl
-  readonly resolution?: { readonly at: string; readonly by: string; readonly evidence: readonly string[] }
+  readonly resolution?: { readonly at: string; readonly by: string; readonly evidence: readonly string[] } | undefined
 }
 
 export interface QuarantineInput {
@@ -77,11 +77,11 @@ export type QuarantineIntegrity = 'ok' | 'corrupted'
 /** Durable quarantine registry. Every mutation writes through before it returns. */
 export class QuarantineStore {
   private readonly records = new Map<string, QuarantineRecord>()
-  private readonly file?: string
-  private readonly io?: QuarantineStoreIo
+  private readonly file?: string | undefined
+  private readonly io?: QuarantineStoreIo | undefined
   private readonly clock: () => string
   /** Load diagnostics: a corrupt file is preserved, never silently dropped. */
-  readonly corruption?: string
+  readonly corruption?: string | undefined
   /**
    * `corrupted` means the previous registry could not be read: no record can be
    * trusted, so every managed resource stays closed until a human clears it.
