@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -13,12 +14,14 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, posix, resolve } from 'node:path'
+import koffi from 'koffi'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Win32Error } from '@deepseek-ai/dsh-win32-process'
 import type {
   CurrentTokenProcessBindings,
   NativePtr,
 } from '@deepseek-ai/dsh-win32-process'
+import type { RangeDiagnosticBindings } from '@deepseek-ai/dsh-win32-process/src/range-diagnostic.ts'
 import {
   cleanupLinuxLaunchFiles,
   consumeLinuxLaunchRequest,
@@ -88,6 +91,39 @@ class FakeRunnerHost extends EventEmitter {
 
 function hostArgument(host: FakeRunnerHost): Parameters<typeof runSpawnRunner>[2] {
   return host as unknown as Parameters<typeof runSpawnRunner>[2]
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+
+/**
+ * Assert the single `started` handshake the runner publishes before any target
+ * result, and return its Job/instance identity for the binding checks.
+ * @param sent - messages the runner published, in order.
+ * @param index - message index the handshake must occupy.
+ * @returns the Job and instance identities bound by that handshake.
+ */
+function expectStartedHandshake(sent: unknown[], index = 0): { jobId: string; instanceId: string } {
+  const types = sent.map(message => (message as { type?: unknown }).type)
+  expect(types.filter(type => type === 'started')).toHaveLength(1)
+  const message = sent[index] as { type?: unknown; jobId?: unknown; instanceId?: unknown; pid?: unknown }
+  expect(message.type).toBe('started')
+  expect(message.pid).toBe(process.pid)
+  const { jobId, instanceId } = message
+  expect(typeof jobId).toBe('string')
+  expect(typeof instanceId).toBe('string')
+  expect(jobId).toMatch(UUID_PATTERN)
+  expect(instanceId).toMatch(UUID_PATTERN)
+  expect(instanceId).not.toBe(jobId)
+  return { jobId: jobId as string, instanceId: instanceId as string }
+}
+
+/**
+ * Assert a pre-commit startup failure published its error instead of a handshake:
+ * an error is allowed to precede `started`, never to be replaced by it.
+ * @param sent - messages the runner published, in order.
+ */
+function expectNoStarted(sent: unknown[]): void {
+  expect(sent.map(message => (message as { type?: unknown }).type)).not.toContain('started')
 }
 
 function internals(overrides: Partial<SpawnRunnerInternals> = {}): SpawnRunnerInternals {
@@ -723,7 +759,10 @@ describe('Windows Job runner protocol owner', () => {
     expect(closeFileDescriptor).toHaveBeenNthCalledWith(3, 6)
     expect(native.closeHandleChecked).toHaveBeenCalledWith(expect.anything(), 10n, 'ordinary direct process')
     expect(native.closeHandleChecked).toHaveBeenCalledWith(expect.anything(), 20n, 'ordinary process Job')
-    expect(host.sent).toEqual([{ type: 'target-exit', exitCode: 0 }])
+    // The handshake owns index 0: no target-exit can be published ahead of it.
+    expect(host.sent).toHaveLength(2)
+    expectStartedHandshake(host.sent)
+    expect(host.sent[1]).toEqual({ type: 'target-exit', exitCode: 0 })
     expect(host.exitCode).toBe(0)
     expect(host.env).toEqual({ SAFE: 'bootstrap' })
   })
@@ -746,7 +785,9 @@ describe('Windows Job runner protocol owner', () => {
       })
       await runWindows(host, native, { type: 'start', cwd: 'C:\\target', env: {}, ...control === undefined ? {} : { control } })
       expect(events).toEqual(['close:4', 'close:5', 'close:6', ...control === 'pipe' ? ['close:7'] : [], 'interval', 'poll'])
-      expect(host.sent).toEqual([{ type: 'target-exit', exitCode: 0 }])
+      expect(host.sent).toHaveLength(2)
+      expectStartedHandshake(host.sent)
+      expect(host.sent[1]).toEqual({ type: 'target-exit', exitCode: 0 })
       expect(host.exitCode).toBe(0)
     } finally {
       interval.mockRestore()
@@ -759,6 +800,8 @@ describe('Windows Job runner protocol owner', () => {
       spawnCurrentTokenJobProcess: vi.fn(() => { throw new Win32Error('CreateProcessW', 2) }),
     }))
     expect(spawnHost.sent).toMatchObject([{ type: 'error', error: { code: 'ENOENT', path: 'tool.exe' } }])
+    // A target that never launched publishes the error alone: no handshake, no result ordering claim.
+    expectNoStarted(spawnHost.sent)
     expect(spawnHost.exitCode).toBe(0)
 
     const runnerHost = new FakeRunnerHost()
@@ -766,6 +809,7 @@ describe('Windows Job runner protocol owner', () => {
       loadWin32ProcessBindings: vi.fn(() => { throw new Error('binding failed') }),
     }))
     expect(runnerHost.sent).toMatchObject([{ type: 'error', error: { message: 'binding failed' } }])
+    expectNoStarted(runnerHost.sent)
     expect(runnerHost.exitCode).toBe(127)
 
     const cancelledHost = new FakeRunnerHost()
@@ -869,7 +913,9 @@ describe('Windows Job runner protocol owner', () => {
     await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
     failedHost.emit('message', { type: 'terminate' })
     await failedRun
-    expect(failedHost.sent).toMatchObject([{ type: 'error', error: { message: 'terminate Job failed' } }])
+    expect(failedHost.sent).toHaveLength(2)
+    expectStartedHandshake(failedHost.sent)
+    expect(failedHost.sent[1]).toMatchObject({ type: 'error', error: { message: 'terminate Job failed' } })
   })
 
   it('finishes when a later poll observes Job emptiness after result delivery', async () => {
@@ -886,7 +932,9 @@ describe('Windows Job runner protocol owner', () => {
     )
     host.emit('message', { type: 'start', cwd: 'C:\\target', env: {} })
     await running
-    expect(host.sent).toEqual([{ type: 'target-exit', exitCode: 0 }])
+    expect(host.sent).toHaveLength(2)
+    expectStartedHandshake(host.sent)
+    expect(host.sent[1]).toEqual({ type: 'target-exit', exitCode: 0 })
     expect(native.isJobEmpty).toHaveBeenCalledTimes(2)
   })
 
@@ -895,7 +943,9 @@ describe('Windows Job runner protocol owner', () => {
     await runWindows(failedHost, internals({
       pollProcessExit: vi.fn(() => { throw new Error('poll failed') }),
     }))
-    expect(failedHost.sent).toMatchObject([{ type: 'error', error: { message: 'poll failed' } }])
+    expect(failedHost.sent).toHaveLength(2)
+    expectStartedHandshake(failedHost.sent)
+    expect(failedHost.sent[1]).toMatchObject({ type: 'error', error: { message: 'poll failed' } })
 
     let tick: (() => void) | undefined
     const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation((callback: () => void) => {
@@ -989,5 +1039,521 @@ describe('Windows Job runner protocol owner', () => {
     const noSelection = new FakeRunnerHost()
     await reportSpawnRunnerFailure(undefined, new Error('no selector'), hostArgument(noSelection))
     expect(noSelection.exitCode).toBe(127)
+  })
+})
+
+describe('runner diagnostics', () => {
+  /** Byte offset of ActiveProcesses inside JOBOBJECT_BASIC_ACCOUNTING_INFORMATION. */
+  const ACTIVE_PROCESSES_OFFSET = 40
+
+  /** Diagnostic-only stub: one running child inside the exact Job, two active members. */
+  function diagnosticBindings(overrides: Partial<RangeDiagnosticBindings> = {}): RangeDiagnosticBindings {
+    return {
+      openProcess: vi.fn(() => 200n as NativePtr),
+      waitForSingleObject: vi.fn(() => 258),
+      getProcessTimes: vi.fn(() => 1),
+      isProcessInJob: vi.fn((_process: NativePtr, _job: NativePtr, result: NativePtr) => {
+        koffi.encode(result, 'uint32', 1)
+        return 1
+      }),
+      queryInformationJobObject: vi.fn((_job: NativePtr, _class: number, information: Buffer) => {
+        information.writeUInt32LE(2, ACTIVE_PROCESSES_OFFSET)
+        return 1
+      }),
+      closeHandle: vi.fn(() => 1),
+      getLastError: vi.fn(() => 5),
+      formatMessageW: vi.fn(() => 0),
+      ...overrides,
+    }
+  }
+
+  function readEvents(file: string): Array<Record<string, unknown>> {
+    if (!existsSync(file)) return []
+    return readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(line => line.length > 0)
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+  }
+
+  function traceEnvironment(directory: string, nonce = 'nonce-t1'): {
+    ndjson: string
+    ready: string
+    env: NodeJS.ProcessEnv
+  } {
+    scratch.push(directory)
+    const ndjson = join(directory, 'trace.ndjson')
+    const ready = join(directory, 'ready.json')
+    return {
+      ndjson,
+      ready,
+      env: {
+        DSH_RUNNER_DIAG: ndjson,
+        DSH_RUNNER_DIAG_READY: ready,
+        DSH_RUNNER_DIAG_NONCE: nonce,
+      },
+    }
+  }
+
+  it('forwards the diagnostic switches past the parent environment scrub', () => {
+    try {
+      vi.stubEnv('DSH_RUNNER_DIAG', 'C:\\trace.ndjson')
+      vi.stubEnv('DSH_RUNNER_DIAG_READY', 'C:\\ready.json')
+      vi.stubEnv('DSH_RUNNER_DIAG_NONCE', 'nonce-forward')
+      const env = runnerEnvironment(WINDOWS_RUNNER_SELECTION)
+      expect(env.DSH_RUNNER_DIAG).toBe('C:\\trace.ndjson')
+      expect(env.DSH_RUNNER_DIAG_READY).toBe('C:\\ready.json')
+      expect(env.DSH_RUNNER_DIAG_NONCE).toBe('nonce-forward')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+    // Nothing is forwarded when the host never asked for a trace.
+    const plain = runnerEnvironment(WINDOWS_RUNNER_SELECTION)
+    expect(plain.DSH_RUNNER_DIAG).toBeUndefined()
+    expect(plain.DSH_RUNNER_DIAG_READY).toBeUndefined()
+    expect(plain.DSH_RUNNER_DIAG_NONCE).toBeUndefined()
+  })
+
+  it('keeps the diagnostic bindings unloaded when no sink is named', async () => {
+    const host = new FakeRunnerHost()
+    const load = vi.fn(() => diagnosticBindings())
+    await runWindows(host, internals({ loadRangeDiagnosticBindings: load }))
+
+    expect(load).not.toHaveBeenCalled()
+    expect(host.sent.map(message => (message as { type?: string }).type)).toEqual(['started', 'target-exit'])
+  })
+
+  it('runs untraced when the diagnostic bindings cannot load', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-diag-init-'))
+    const trace = traceEnvironment(directory)
+    const host = new FakeRunnerHost()
+    host.env = trace.env
+    await runWindows(host, internals({
+      loadRangeDiagnosticBindings: vi.fn(() => { throw new Error('diagnostic bind failed') }),
+    }))
+
+    // A failed open is not a runner failure: the ordinary protocol is unchanged.
+    expect(host.sent.map(message => (message as { type?: string }).type)).toEqual(['started', 'target-exit'])
+    expect(host.exitCode).toBe(0)
+    // The failure itself is traced through the plain filesystem, and nothing else is.
+    const events = readEvents(trace.ndjson)
+    expect(events.map(event => event.event)).toEqual(['diag-open-failed'])
+    expect(events[0]?.origin).toBe('runner')
+    expect(String(events[0]?.detail)).toContain('diagnostic bind failed')
+  })
+
+  it('observes the READY child once, against the exact Job handle', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-diag-t1-'))
+    const trace = traceEnvironment(directory)
+    const openProcess = vi.fn(() => 200n as NativePtr)
+    const isProcessInJob = vi.fn((_process: NativePtr, _job: NativePtr, result: NativePtr) => {
+      koffi.encode(result, 'uint32', 1)
+      return 1
+    })
+    const api = diagnosticBindings({ openProcess, isProcessInJob })
+    const host = new FakeRunnerHost()
+    host.env = trace.env
+    let tick: (() => void) | undefined
+    const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation((callback: () => void) => {
+      tick = callback
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    try {
+      const native = internals({
+        loadRangeDiagnosticBindings: vi.fn(() => api),
+        pollProcessExit: vi.fn(() => undefined),
+        isJobEmpty: vi.fn(() => false),
+      })
+      const running = runSpawnRunner(WINDOWS_RUNNER_SELECTION, ['--', 'tool.exe'], hostArgument(host), native)
+      host.emit('message', { type: 'start', cwd: 'C:\\target', env: {} })
+      await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+      writeFileSync(trace.ready, JSON.stringify({ pid: 4242, nonce: 'nonce-t1' }))
+      tick?.()
+      tick?.()
+      host.disconnect()
+      await running
+    } finally {
+      interval.mockRestore()
+    }
+
+    const events = readEvents(trace.ndjson)
+    const observed = events.filter(event => event.event === 'child-observed')
+    expect(observed).toHaveLength(1)
+    expect(observed[0]).toMatchObject({
+      phase: 'T1',
+      childPid: 4242,
+      nonce: 'nonce-t1',
+      childAlive: 'running',
+      isProcessInJob: true,
+      activeProcesses: 2,
+      targetPid: 123,
+      apiError: null,
+    })
+    expect(openProcess).toHaveBeenCalledWith(0x1000 | 0x00100000, 0, 4242)
+    expect(isProcessInJob).toHaveBeenCalledWith(200n, 20n, expect.anything())
+  })
+
+  it('rejects a READY record whose nonce does not match', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-diag-nonce-'))
+    const trace = traceEnvironment(directory, 'expected-nonce')
+    const openProcess = vi.fn(() => 200n as NativePtr)
+    const api = diagnosticBindings({ openProcess })
+    const host = new FakeRunnerHost()
+    host.env = trace.env
+    let tick: (() => void) | undefined
+    const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation((callback: () => void) => {
+      tick = callback
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    try {
+      const running = runSpawnRunner(WINDOWS_RUNNER_SELECTION, ['--', 'tool.exe'], hostArgument(host), internals({
+        loadRangeDiagnosticBindings: vi.fn(() => api),
+        pollProcessExit: vi.fn(() => undefined),
+        isJobEmpty: vi.fn(() => false),
+      }))
+      host.emit('message', { type: 'start', cwd: 'C:\\target', env: {} })
+      await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+      writeFileSync(trace.ready, JSON.stringify({ pid: 4242, nonce: 'wrong-nonce' }))
+      tick?.()
+      tick?.()
+      host.disconnect()
+      await running
+    } finally {
+      interval.mockRestore()
+    }
+
+    const events = readEvents(trace.ndjson)
+    expect(events.filter(event => event.event === 'child-observed')).toHaveLength(0)
+    expect(events.filter(event => event.event === 'ready-invalid')).toHaveLength(1)
+    expect(events.find(event => event.event === 'ready-invalid')).toMatchObject({ detail: 'nonce-mismatch' })
+    expect(openProcess).not.toHaveBeenCalled()
+  })
+
+  it('re-samples the T1 child with its creation identity when the root exits', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-diag-t2-'))
+    const trace = traceEnvironment(directory)
+    const openProcess = vi.fn(() => 200n as NativePtr)
+    const api = diagnosticBindings({ openProcess })
+    const host = new FakeRunnerHost()
+    host.env = trace.env
+    let tick: (() => void) | undefined
+    const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation((callback: () => void) => {
+      tick = callback
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    try {
+      const running = runSpawnRunner(WINDOWS_RUNNER_SELECTION, ['--', 'tool.exe'], hostArgument(host), internals({
+        loadRangeDiagnosticBindings: vi.fn(() => api),
+        pollProcessExit: vi.fn().mockReturnValueOnce(undefined).mockReturnValue(0),
+        // The Job must survive the first tick, or the root-exit probe has no handle left.
+        isJobEmpty: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
+      }))
+      host.emit('message', { type: 'start', cwd: 'C:\\target', env: {} })
+      await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+      writeFileSync(trace.ready, JSON.stringify({ pid: 4242, nonce: 'nonce-t1' }))
+      tick?.()
+      tick?.()
+      await running
+    } finally {
+      interval.mockRestore()
+    }
+
+    const events = readEvents(trace.ndjson)
+    const t1 = events.find(event => event.event === 'child-observed')
+    const t2 = events.find(event => event.event === 'root-exit-observed')
+    expect(t1).toBeDefined()
+    expect(t2).toMatchObject({
+      phase: 'T2',
+      childPid: 4242,
+      isProcessInJob: true,
+      activeProcesses: 2,
+      // A non-null match proves the T1 stamp travelled into the T2 sample.
+      identityMatch: true,
+    })
+    expect(t2?.creationTime).toBe(t1?.creationTime)
+    expect(openProcess).toHaveBeenCalledTimes(2)
+  })
+})
+
+
+describe('runner range channel', () => {
+  /** Byte offset of ActiveProcesses inside JOBOBJECT_BASIC_ACCOUNTING_INFORMATION. */
+  const ACTIVE_PROCESSES_OFFSET = 40
+
+  /** Win32 stub: the first query reports one member, later queries report an empty range. */
+  function rangeBindings(): {
+    api: CurrentTokenProcessBindings
+    queryInformationJobObject: ReturnType<typeof vi.fn>
+    terminateJobObject: ReturnType<typeof vi.fn>
+  } {
+    let queries = 0
+    const queryInformationJobObject = vi.fn((_job: NativePtr, _class: number, information: Buffer) => {
+      queries += 1
+      information.writeUInt32LE(queries === 1 ? 1 : 0, ACTIVE_PROCESSES_OFFSET)
+      return 1
+    })
+    const terminateJobObject = vi.fn(() => 1)
+    const api = {
+      queryInformationJobObject,
+      terminateJobObject,
+      getLastError: vi.fn(() => 5),
+      formatMessageW: vi.fn(() => 0),
+    } as unknown as CurrentTokenProcessBindings
+    return { api, queryInformationJobObject, terminateJobObject }
+  }
+
+  /** Start one runner against the range stub and leave it alive for the channel cases. */
+  async function startedRunner(options: {
+    bindings?: CurrentTokenProcessBindings
+    beforeStart?: (host: FakeRunnerHost) => void
+  } = {}): Promise<{ host: FakeRunnerHost; native: SpawnRunnerInternals; running: Promise<void> }> {
+    const host = new FakeRunnerHost()
+    const native = internals({
+      loadWin32ProcessBindings: vi.fn(() => options.bindings ?? rangeBindings().api),
+      pollProcessExit: vi.fn(() => undefined),
+      isJobEmpty: vi.fn(() => false),
+    })
+    const running = runSpawnRunner(WINDOWS_RUNNER_SELECTION, ['--', 'tool.exe'], hostArgument(host), native)
+    options.beforeStart?.(host)
+    host.emit('message', { type: 'start', cwd: 'C:\\target', env: {} })
+    await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+    return { host, native, running }
+  }
+
+  async function settle(): Promise<void> {
+    await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+  }
+
+  function rangeReplies(host: FakeRunnerHost): Array<Record<string, unknown>> {
+    return host.sent.filter((message): message is Record<string, unknown> =>
+      (message as { type?: string }).type === 'range-result')
+  }
+
+  it('answers a verify with the runner identity and never terminates', async () => {
+    const bindings = rangeBindings()
+    const { host, running } = await startedRunner({ bindings: bindings.api })
+    host.emit('message', { type: 'verify-range', requestId: 11 })
+    await settle()
+
+    const [answer] = rangeReplies(host)
+    expect(answer).toMatchObject({ type: 'range-result', requestId: 11, state: 'partial' })
+    expect(typeof answer?.jobId).toBe('string')
+    expect(typeof answer?.instanceId).toBe('string')
+    expect(bindings.terminateJobObject).not.toHaveBeenCalled()
+
+    host.disconnect()
+    await running
+  })
+
+  it('terminates, re-queries emptiness, and replays a duplicate requestId from the cache', async () => {
+    const bindings = rangeBindings()
+    const { host, running } = await startedRunner({ bindings: bindings.api })
+    host.emit('message', { type: 'terminate-range', requestId: 21 })
+    await settle()
+    host.emit('message', { type: 'terminate-range', requestId: 21 })
+    await settle()
+
+    const replies = rangeReplies(host)
+    expect(replies).toHaveLength(2)
+    expect(replies[1]).toEqual(replies[0])
+    expect(replies[0]).toMatchObject({ requestId: 21, state: 'terminated', activeAfter: 0 })
+    // The replay came from the cache: the Job was queried only for the first request.
+    expect(bindings.queryInformationJobObject).toHaveBeenCalledTimes(2)
+    expect(bindings.terminateJobObject).toHaveBeenCalledTimes(1)
+
+    host.disconnect()
+    await running
+  })
+
+  it('reports job-not-created when a range request arrives before the Job exists', async () => {
+    const host = new FakeRunnerHost()
+    const running = runSpawnRunner(WINDOWS_RUNNER_SELECTION, ['--', 'tool.exe'], hostArgument(host), internals({
+      pollProcessExit: vi.fn(() => undefined),
+      isJobEmpty: vi.fn(() => false),
+    }))
+    host.emit('message', { type: 'verify-range', requestId: 3 })
+    await settle()
+
+    expect(host.sent[0]).toMatchObject({ type: 'range-result', requestId: 3, state: 'unknown', evidence: ['job-not-created'] })
+    host.disconnect()
+    await running
+  })
+
+  /** Win32 stub whose Job queries fail, standing in for an unusable/invalid Job handle. */
+  function failingRangeBindings(): {
+    api: CurrentTokenProcessBindings
+    queryInformationJobObject: ReturnType<typeof vi.fn>
+    terminateJobObject: ReturnType<typeof vi.fn>
+  } {
+    const queryInformationJobObject = vi.fn(() => 0)
+    const terminateJobObject = vi.fn(() => 1)
+    const api = {
+      queryInformationJobObject,
+      terminateJobObject,
+      getLastError: vi.fn(() => 5),
+      formatMessageW: vi.fn(() => 0),
+    } as unknown as CurrentTokenProcessBindings
+    return { api, queryInformationJobObject, terminateJobObject }
+  }
+
+  it('reports a Job-query failure as unknown instead of an empty range', async () => {
+    const bindings = failingRangeBindings()
+    const { host, running } = await startedRunner({ bindings: bindings.api })
+
+    host.emit('message', { type: 'verify-range', requestId: 41 })
+    await settle()
+    const [answer] = rangeReplies(host)
+    expect(answer).toMatchObject({ requestId: 41, state: 'unknown' })
+    const evidence = answer?.evidence as string[]
+    expect(String(evidence[0])).toContain('verify-failed')
+    expect(String(evidence[0])).toContain('QueryInformationJobObject')
+    // A failed observation proves nothing: the reply is neither empty nor terminal.
+    expect(answer?.state).not.toBe('empty')
+    expect(answer?.activeAfter).toBeUndefined()
+
+    // The cached reply for this id stays unknown, and no second native query runs.
+    host.emit('message', { type: 'verify-range', requestId: 41 })
+    await settle()
+    expect(rangeReplies(host)).toHaveLength(2)
+    expect(rangeReplies(host)[1]).toEqual(rangeReplies(host)[0])
+    expect(bindings.queryInformationJobObject).toHaveBeenCalledTimes(1)
+
+    host.disconnect()
+    await running
+  })
+
+  it('refuses to terminate when the pre-termination query fails', async () => {
+    const bindings = failingRangeBindings()
+    const { host, running } = await startedRunner({ bindings: bindings.api })
+
+    host.emit('message', { type: 'terminate-range', requestId: 51 })
+    await settle()
+    const [answer] = rangeReplies(host)
+    expect(answer).toMatchObject({ requestId: 51, state: 'unknown' })
+    expect(String((answer?.evidence as string[])[0])).toContain('query-before-failed')
+    expect(answer?.activeAfter).toBeUndefined()
+
+    // An unprovable range is never terminated and never cached as terminated.
+    expect(bindings.terminateJobObject).not.toHaveBeenCalled()
+    host.emit('message', { type: 'terminate-range', requestId: 51 })
+    await settle()
+    expect(rangeReplies(host)).toHaveLength(2)
+    expect(rangeReplies(host)[1]).toEqual(rangeReplies(host)[0])
+
+    host.disconnect()
+    await running
+  })
+
+  /** Win32 stub whose Job query succeeds but whose termination fails. */
+  function terminateFailingBindings(mode: 'returns-zero' | 'throws'): {
+    api: CurrentTokenProcessBindings
+    terminateJobObject: ReturnType<typeof vi.fn>
+  } {
+    const terminateJobObject = vi.fn(() => {
+      if (mode === 'returns-zero') return 0
+      throw new Error('terminate exploded')
+    })
+    const api = {
+      queryInformationJobObject: vi.fn((_job: NativePtr, _class: number, information: Buffer) => {
+        information.writeUInt32LE(1, ACTIVE_PROCESSES_OFFSET)
+        return 1
+      }),
+      terminateJobObject,
+      getLastError: vi.fn(() => 5),
+      formatMessageW: vi.fn(() => 0),
+    } as unknown as CurrentTokenProcessBindings
+    return { api, terminateJobObject }
+  }
+
+  /** Collect unhandled rejections for one test window. */
+  async function withUnhandledGuard(run: () => Promise<void>): Promise<unknown[]> {
+    const unhandled: unknown[] = []
+    const record = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', record)
+    try {
+      await run()
+      await settle()
+      await settle()
+      return unhandled
+    } finally {
+      process.off('unhandledRejection', record)
+    }
+  }
+
+  it('maps a failed TerminateJobObject to unknown instead of a terminal state', async () => {
+    const bindings = terminateFailingBindings('returns-zero')
+    const { host, running } = await startedRunner({ bindings: bindings.api })
+
+    const unhandled = await withUnhandledGuard(async () => {
+      host.emit('message', { type: 'terminate-range', requestId: 61 })
+      await settle()
+
+      const [answer] = rangeReplies(host)
+      expect(answer).toMatchObject({ requestId: 61, state: 'unknown' })
+      expect(String((answer?.evidence as string[])[0])).toContain('terminate-failed')
+      expect(answer?.state).not.toBe('terminated')
+      expect(answer?.state).not.toBe('empty')
+      expect(answer?.activeAfter).toBeUndefined()
+      expect(bindings.terminateJobObject).toHaveBeenCalledTimes(1)
+
+      // The replayed requestId returns the identical unknown answer, without a
+      // second native termination attempt.
+      host.emit('message', { type: 'terminate-range', requestId: 61 })
+      await settle()
+      expect(rangeReplies(host)).toHaveLength(2)
+      expect(rangeReplies(host)[1]).toEqual(rangeReplies(host)[0])
+      expect(bindings.terminateJobObject).toHaveBeenCalledTimes(1)
+
+      // The failure did not wedge the channel: a later verify is still answered.
+      host.emit('message', { type: 'verify-range', requestId: 62 })
+      await settle()
+      expect(rangeReplies(host)[2]).toMatchObject({ requestId: 62, state: 'partial' })
+    })
+
+    expect(unhandled).toEqual([])
+    host.disconnect()
+    await running
+  })
+
+  it('maps a throwing terminateJob to unknown and leaves no unhandled rejection', async () => {
+    const bindings = terminateFailingBindings('throws')
+    const { host, running } = await startedRunner({ bindings: bindings.api })
+
+    const unhandled = await withUnhandledGuard(async () => {
+      host.emit('message', { type: 'terminate-range', requestId: 71 })
+      await settle()
+
+      const [answer] = rangeReplies(host)
+      expect(answer).toMatchObject({ requestId: 71, state: 'unknown' })
+      const evidence = String((answer?.evidence as string[])[0])
+      expect(evidence).toContain('terminate-failed')
+      expect(evidence).toContain('terminate exploded')
+      expect(answer?.activeAfter).toBeUndefined()
+
+      host.emit('message', { type: 'verify-range', requestId: 72 })
+      await settle()
+      expect(rangeReplies(host)[1]).toMatchObject({ requestId: 72, state: 'partial' })
+    })
+
+    expect(unhandled).toEqual([])
+    host.disconnect()
+    await running
+  })
+
+  it('reports a malformed range request as protocol-error and keeps the channel usable', async () => {
+    const { host, running } = await startedRunner()
+    host.emit('message', { type: 'verify-range', requestId: 'not-a-number' })
+    await settle()
+
+    const protocolError = host.sent.find(message => (message as { type?: string }).type === 'protocol-error')
+    expect(protocolError).toMatchObject({ type: 'protocol-error', reason: 'invalid-range-request' })
+
+    // The channel stayed alive: a well-formed request is still answered.
+    host.emit('message', { type: 'verify-range', requestId: 31 })
+    await settle()
+    expect(rangeReplies(host)).toHaveLength(1)
+    expect(rangeReplies(host)[0]).toMatchObject({ requestId: 31 })
+
+    host.disconnect()
+    await running
   })
 })

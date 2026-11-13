@@ -64,6 +64,20 @@ export async function handleRangeRequest(
       return { type: 'range-result', requestId: request.requestId, jobId, state: 'unknown', evidence: [`verify-failed:${String(error)}`], observedAt }
     }
   }
-  const result = await terminateJobRange(api, job)
+  // The runner answers every request, so a native termination failure is mapped to
+  // an explicit unknown reply instead of rejecting out of the IPC handler.
+  let result: Awaited<ReturnType<typeof terminateJobRange>>
+  try {
+    result = await terminateJobRange(api, job)
+  } catch (error) {
+    return {
+      type: 'range-result',
+      requestId: request.requestId,
+      jobId,
+      state: 'unknown',
+      evidence: [`terminate-failed:${String(error)}`],
+      observedAt,
+    }
+  }
   return { type: 'range-result', requestId: request.requestId, jobId, state: result.state, activeBefore: result.activeBefore, activeAfter: result.activeAfter, evidence: result.evidence, observedAt }
 }

@@ -44,8 +44,10 @@ export async function terminateJobRange(
   } catch (error) {
     return { state: 'unknown', evidence: [`query-before-failed:${String(error)}`] }
   }
-  const terminated = terminateJob(api, job, options.exitCode ?? 1)
-  evidence.push(`TerminateJobObject:${terminated}`)
+  // terminateJob throws on failure, so reaching this line means the request was
+  // issued; the void return must not be interpolated into the evidence string.
+  terminateJob(api, job, options.exitCode ?? 1)
+  evidence.push('TerminateJobObject:issued')
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       if (isJobEmpty(api, job)) return { state: 'terminated', activeAfter: 0, evidence }

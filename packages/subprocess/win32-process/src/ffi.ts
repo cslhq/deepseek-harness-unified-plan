@@ -128,11 +128,32 @@ export interface CurrentTokenProcessBindings extends Win32ProcessBindings {
   uvGetOsfhandle(fileDescriptor: number): NativePtr | null
 }
 
+/**
+ * Process-identity calls bound only by {@link loadRangeDiagnosticBindings}.
+ * An ordinary launch never binds them, so a runner that only creates processes
+ * carries neither the symbols nor the obligation to stub them.
+ */
+export interface RangeDiagnosticBindingTable {
+  /** Open one process handle with the caller's access rights. */
+  openProcess(desiredAccess: number, inheritHandle: number, processId: number): NativePtr
+  /** Report whether a process handle belongs to one exact Job handle. */
+  isProcessInJob(process: NativePtr, job: NativePtr, result: NativePtr): number
+  /** Read creation, exit, kernel, and user times for one process handle. */
+  getProcessTimes(
+    process: NativePtr,
+    creation: NativePtr,
+    exitTime: NativePtr,
+    kernel: NativePtr,
+    user: NativePtr,
+  ): number
+}
+
 interface Win32Types {
   PVOID: Ptr
   PPVOID: Ptr
   STARTUPINFOW: ReturnType<Koffi['struct']>
   PROCESS_INFORMATION: ReturnType<Koffi['struct']>
+  FILETIME: ReturnType<Koffi['struct']>
 }
 
 let cachedTypes: Win32Types | undefined
@@ -143,16 +164,20 @@ function win32Types(): Win32Types {
   const koffi = requireKoffi()
   const PVOID = koffi.pointer('void')
   const PPVOID = koffi.pointer(PVOID)
-  const STARTUPINFOW = koffi.struct('DSH_STARTUPINFOW', {
+  // Anonymous layouts on purpose: Koffi's named registry is process-global, and a
+  // built runner can load this module twice (bundled lib plus the ./src subpath
+  // its diagnostics use), which would otherwise fail on a duplicate name.
+  const STARTUPINFOW = koffi.struct({
     cb: 'uint32', lpReserved: 'str16', lpDesktop: 'str16', lpTitle: 'str16',
     dwX: 'uint32', dwY: 'uint32', dwXSize: 'uint32', dwYSize: 'uint32',
     dwXCountChars: 'uint32', dwYCountChars: 'uint32', dwFillAttribute: 'uint32',
     dwFlags: 'uint32', wShowWindow: 'uint16', cbReserved2: 'uint16',
     lpReserved2: koffi.pointer('uint8'), hStdInput: PVOID, hStdOutput: PVOID, hStdError: PVOID,
   })
-  const PROCESS_INFORMATION = koffi.struct('DSH_PROCESS_INFORMATION', {
+  const PROCESS_INFORMATION = koffi.struct({
     hProcess: PVOID, hThread: PVOID, dwProcessId: 'uint32', dwThreadId: 'uint32',
   })
+  const FILETIME = koffi.struct({ dwLowDateTime: 'uint32', dwHighDateTime: 'uint32' })
   /* v8 ignore start -- ABI guards are pinned by native header probes. */
   if (STARTUPINFOW.size !== abi.STARTUPINFOW_SIZE) {
     throw new Error(`STARTUPINFOW layout mismatch: koffi computed ${STARTUPINFOW.size}, expected ${abi.STARTUPINFOW_SIZE}`)
@@ -160,8 +185,11 @@ function win32Types(): Win32Types {
   if (PROCESS_INFORMATION.size !== abi.PROCESS_INFORMATION_SIZE) {
     throw new Error(`PROCESS_INFORMATION layout mismatch: koffi computed ${PROCESS_INFORMATION.size}, expected ${abi.PROCESS_INFORMATION_SIZE}`)
   }
+  if (FILETIME.size !== abi.FILETIME_SIZE) {
+    throw new Error(`FILETIME layout mismatch: koffi computed ${FILETIME.size}, expected ${abi.FILETIME_SIZE}`)
+  }
   /* v8 ignore stop */
-  return cachedTypes = { PVOID, PPVOID, STARTUPINFOW, PROCESS_INFORMATION }
+  return cachedTypes = { PVOID, PPVOID, STARTUPINFOW, PROCESS_INFORMATION, FILETIME }
 }
 
 /**
@@ -214,6 +242,34 @@ export function decodePtr(slot: NativePtr): NativePtr | null {
  */
 export function decodeUint32(slot: NativePtr): number {
   return requireKoffi().decode(slot, 'uint32') as number
+}
+
+/**
+ * Materialize the FILETIME layout on first native use.
+ * @returns the cached native struct type.
+ */
+export function fileTimeType(): ReturnType<Koffi['struct']> {
+  return win32Types().FILETIME
+}
+
+/**
+ * Allocate a zeroed FILETIME out-parameter slot.
+ * @returns allocated native slot.
+ */
+export function allocFileTime(): NativePtr {
+  return requireKoffi().alloc(win32Types().FILETIME, 1) as NativePtr
+}
+
+/**
+ * Decode a FILETIME out-parameter.
+ * @param slot - FILETIME slot filled by Win32.
+ * @returns the two 32-bit halves of the 64-bit timestamp.
+ */
+export function decodeFileTime(slot: NativePtr): { dwLowDateTime: number; dwHighDateTime: number } {
+  return requireKoffi().decode(slot, win32Types().FILETIME) as {
+    dwLowDateTime: number
+    dwHighDateTime: number
+  }
 }
 
 /**
@@ -331,6 +387,23 @@ export function extendWin32ProcessBindings<Extension extends object>(
 export function loadWin32ProcessBindings(): CurrentTokenProcessBindings {
   return bindings()
 }
+
+/**
+ * Bind the process-identity calls range diagnostics need, on top of the shared table.
+ *
+ * Ordinary launched processes never reach this loader: {@link loadWin32ProcessBindings}
+ * stays exactly as it was, so a runner that only spawns a target binds nothing extra.
+ *
+ * @returns the shared process table extended with the three diagnostic-only calls.
+ */
+export function loadRangeDiagnosticBindings(): CurrentTokenProcessBindings & RangeDiagnosticBindingTable {
+  const { PVOID } = win32Types()
+  return extendWin32ProcessBindings(({ kernel32, bind }) => ({
+    openProcess: bind(kernel32, 'OpenProcess', PVOID, ['uint32', 'int', 'uint32']),
+    isProcessInJob: bind(kernel32, 'IsProcessInJob', 'int', [PVOID, PVOID, PVOID]),
+    getProcessTimes: bind(kernel32, 'GetProcessTimes', 'int', [PVOID, PVOID, PVOID, PVOID, PVOID]),
+  } as RangeDiagnosticBindingTable))
+}
 /* v8 ignore stop */
 
 /**
@@ -339,7 +412,7 @@ export function loadWin32ProcessBindings(): CurrentTokenProcessBindings {
  * @param win32Code - captured GetLastError value.
  * @returns trimmed system message, or an empty string when unavailable.
  */
-export function errorText(api: Win32ProcessBindings, win32Code: number): string {
+export function errorText(api: Pick<Win32ProcessBindings, 'formatMessageW'>, win32Code: number): string {
   const buffer = Buffer.alloc(1024)
   const length = api.formatMessageW(
     abi.FORMAT_MESSAGE_FROM_SYSTEM | abi.FORMAT_MESSAGE_IGNORE_INSERTS,

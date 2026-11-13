@@ -4,7 +4,7 @@ import { SUBPROCESS_CONTROL_FD } from '@deepseek-ai/dsh-subprocess/control'
 import { randomUUID } from 'node:crypto'
 import { handleRangeRequest, isWindowsRangeLikeRequest, parseRangeRequest } from './range-handler.ts'
 import type { RangeRequest } from './range-handler.ts'
-import { closeSync } from 'node:fs'
+import { closeSync, existsSync, readFileSync } from 'node:fs'
 import {
   closeHandleChecked,
   isJobEmpty,
@@ -18,6 +18,18 @@ import type {
   CurrentTokenProcessBindings,
   NativePtr,
 } from '@deepseek-ai/dsh-win32-process'
+// Diagnostics stay off the package root: only this runner imports them, and it
+// reaches them through the package's existing `./src/*` export subpath.
+import { loadRangeDiagnosticBindings } from '@deepseek-ai/dsh-win32-process/src/ffi.ts'
+import { activeProcesses, sampleChild } from '@deepseek-ai/dsh-win32-process/src/range-diagnostic.ts'
+import type { RangeDiagnosticBindings } from '@deepseek-ai/dsh-win32-process/src/range-diagnostic.ts'
+import {
+  childSampleFields,
+  createRunnerDiagnostic,
+  recordDiagnosticOpenFailure,
+  RUNNER_DIAG_ENV,
+} from './runner-diagnostic.ts'
+import type { RunnerDiagnostic } from './runner-diagnostic.ts'
 import { loadLinuxExecve } from './linux-execve.ts'
 import {
   consumeLinuxLaunchRequest,
@@ -48,6 +60,8 @@ type RunnerHost = Pick<NodeJS.Process, 'env' | 'exitCode' | 'connected' | 'cwd' 
 export interface SpawnRunnerInternals {
   execve(file: string, argv: string[], env: Record<string, string>, control?: 'pipe'): never
   loadWin32ProcessBindings(): CurrentTokenProcessBindings
+  /** Diagnostic-only table; bound only when a trace sink was requested. */
+  loadRangeDiagnosticBindings?(): RangeDiagnosticBindings
   spawnCurrentTokenJobProcess: typeof spawnCurrentTokenJobProcess
   closeFileDescriptor(fileDescriptor: number): void
   resolveWindowsExecutable: typeof resolveWindowsExecutable
@@ -61,6 +75,7 @@ const defaultInternals: SpawnRunnerInternals = {
   /* v8 ignore next -- source/built/packaged subprocess smoke executes this only in a replaceable child process. */
   execve: (file, argv, env, control) => loadLinuxExecve()(file, argv, env, control),
   loadWin32ProcessBindings,
+  loadRangeDiagnosticBindings,
   spawnCurrentTokenJobProcess,
   closeFileDescriptor: closeSync,
   resolveWindowsExecutable,
@@ -235,6 +250,14 @@ class WindowsJobRunner {
   private resultStarted = false
   private resultDelivered = false
   private finished = false
+  /** Opt-in trace sink; absent unless the host set DSH_RUNNER_DIAG. */
+  private diagnostic: RunnerDiagnostic | undefined
+  /** Direct target parent pid, recorded for every diagnostic event. */
+  private targetPid: number | undefined
+  /** T1 reads the READY record at most once, whatever it concludes. */
+  private readyChecked = false
+  /** T1 observation reused by T2 as the creation-identity fence. */
+  private t1Child: { readonly pid: number; readonly creationTime: string | undefined } | undefined
   private readonly completion = Promise.withResolvers<void>()
   /** Stable Job identity for range replies; never a PID (PIDs are reused). */
   private readonly jobId = randomUUID()
@@ -250,13 +273,39 @@ class WindowsJobRunner {
   ) {}
 
   run(): Promise<void> {
+    this.diagnostic = this.openDiagnostic()
     if (!this.host.connected || this.host.send === undefined) {
-      this.finish(127)
+      this.finish(127, 'no-ipc-channel')
       return this.completion.promise
     }
     this.host.on('message', this.onMessage)
     this.host.once('disconnect', this.onDisconnect)
     return this.completion.promise
+  }
+
+  /**
+   * Open the trace sink when the host requested one.
+   * A failed open is not a runner failure: diagnostics are optional evidence, so
+   * the runner keeps its normal lifecycle and simply runs untraced.
+   * @returns the sink, or undefined when tracing is off or could not be opened.
+   */
+  private openDiagnostic(): RunnerDiagnostic | undefined {
+    if (this.host.env[RUNNER_DIAG_ENV] === undefined) return undefined
+    try {
+      const internals = this.internals
+      const api = internals.loadRangeDiagnosticBindings === undefined
+        ? loadRangeDiagnosticBindings()
+        : internals.loadRangeDiagnosticBindings()
+      return createRunnerDiagnostic({
+        env: this.host.env,
+        jobId: this.jobId,
+        instanceId: this.instanceId,
+        api,
+      })
+    } catch (error) {
+      recordDiagnosticOpenFailure(this.host.env, error)
+      return undefined
+    }
   }
 
   private readonly onMessage = (value: unknown): void => {
@@ -295,7 +344,7 @@ class WindowsJobRunner {
       if (!this.host.connected || this.host.send === undefined) { resolve(false); return }
       try {
         this.host.send({ type: 'started', jobId: this.jobId, instanceId: this.instanceId, pid: process.pid }, (error) => {
-          resolve(error === null || error === undefined)
+          resolve(error === null)
         })
       } catch {
         resolve(false)
@@ -313,6 +362,12 @@ class WindowsJobRunner {
     const api = this.api
     const job = this.jobHandle
     if (api === undefined || job === undefined) {
+      this.diagnostic?.record('range-served', {
+        phase: 'T5',
+        request: request.type,
+        state: 'unknown',
+        detail: 'job-not-created',
+      })
       this.host.send?.({
         type: 'range-result',
         requestId: request.requestId,
@@ -326,13 +381,52 @@ class WindowsJobRunner {
     const reply = await handleRangeRequest(api, job, this.jobId, request)
     const envelope = { ...reply, instanceId: this.instanceId }
     this.rangeReplies.set(request.requestId, envelope)
+    this.recordRangeServed(request, reply, job)
     this.host.send?.(envelope)
+  }
+
+  /**
+   * T5: record the served range plus an independent ActiveProcesses re-query of
+   * the same Job handle. The diagnostic count never replaces the range reply.
+   * @param request - the range request being answered.
+   * @param reply - the reply that will be sent on the official channel.
+   * @param job - the runner's exact Job handle.
+   */
+  private recordRangeServed(
+    request: RangeRequest,
+    reply: { state: string; activeBefore?: number | undefined; activeAfter?: number | undefined },
+    job: NativePtr,
+  ): void {
+    const diagnostic = this.diagnostic
+    if (diagnostic === undefined) return
+    try {
+      const observed = activeProcesses(diagnostic.api, job)
+      diagnostic.record('range-served', {
+        phase: 'T5',
+        request: request.type,
+        state: reply.state,
+        activeBefore: reply.activeBefore,
+        activeAfter: reply.activeAfter,
+        activeProcesses: observed.ok ? observed.value : undefined,
+        nonce: diagnostic.nonce,
+        ...observed.ok ? {} : {
+          apiError: { api: observed.api, win32Code: observed.win32Code, detail: observed.detail },
+        },
+      })
+    } catch (error) {
+      diagnostic.record('range-served', {
+        phase: 'T5',
+        request: request.type,
+        state: reply.state,
+        detail: `observation-threw:${String(error)}`,
+      })
+    }
   }
 
   private readonly onDisconnect = (): void => {
     if (this.finished) return
     this.releaseOwnedJob()
-    this.finish(127, false)
+    this.finish(127, 'runner-disconnected', false)
   }
 
   private async start(request: WindowsStartRequest): Promise<void> {
@@ -375,13 +469,15 @@ class WindowsJobRunner {
       })
       this.processHandle = spawned.process
       this.jobHandle = spawned.job
+      this.targetPid = spawned.pid
+      this.diagnostic?.record('target-spawned', { targetPid: spawned.pid })
       // The handshake must complete before polling starts, so target-exit can
       // never be published ahead of started — even for a target that exits
       // immediately after spawn.
       const handshake = await this.sendStarted()
       if (!handshake) {
         this.releaseOwnedJob()
-        this.finish(127)
+        this.finish(127, 'started-handshake-failed')
         return
       }
       for (const fileDescriptor of request.control === 'pipe' ? [4, 5, 6, SUBPROCESS_CONTROL_FD] : [4, 5, 6]) {
@@ -424,9 +520,13 @@ class WindowsJobRunner {
     /* v8 ignore next -- poll is installed only after start() stores the bindings; retained as a defensive invariant guard. */
     if (this.api === undefined) return
     try {
+      this.observeReadyChild()
       if (this.processHandle !== undefined) {
         const exitCode = this.internals.pollProcessExit(this.api, this.processHandle)
         if (exitCode !== undefined) {
+          // T2 runs before the existing exit handling so the observation still
+          // sees the Job holding whatever survived the direct target.
+          this.observeRootExit()
           this.internals.closeHandleChecked(this.api, this.processHandle, 'ordinary direct process')
           this.processHandle = undefined
           void this.publishTerminalResult({ type: 'target-exit', exitCode })
@@ -435,10 +535,94 @@ class WindowsJobRunner {
       if (this.jobHandle !== undefined && this.internals.isJobEmpty(this.api, this.jobHandle)) {
         this.internals.closeHandleChecked(this.api, this.jobHandle, 'ordinary process Job')
         this.jobHandle = undefined
-        if (this.resultDelivered) this.finish(0)
+        if (this.resultDelivered) this.finish(0, 'job-empty-after-result')
       }
     } catch (error) {
       void this.runnerFailure(error)
+    }
+  }
+
+  /**
+   * T1: accept the fixture's READY record once, then sample that exact pid
+   * against the runner's Job handle.
+   *
+   * Every outcome is terminal for T1: the record is consumed at most once, so a
+   * malformed or mismatched handshake is reported instead of retried forever.
+   */
+  private observeReadyChild(): void {
+    const diagnostic = this.diagnostic
+    if (diagnostic === undefined || this.readyChecked) return
+    const readyFile = diagnostic.readyFile
+    if (readyFile === undefined) return
+    if (!existsSync(readyFile)) return
+    this.readyChecked = true
+    try {
+      const ready = JSON.parse(readFileSync(readyFile, 'utf8')) as { pid?: unknown; nonce?: unknown }
+      const pid = ready.pid
+      if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {
+        diagnostic.record('ready-invalid', { phase: 'T1', detail: 'pid-not-a-process-id' })
+        return
+      }
+      if (diagnostic.nonce === undefined || ready.nonce !== diagnostic.nonce) {
+        diagnostic.record('ready-invalid', {
+          phase: 'T1',
+          childPid: pid,
+          nonce: typeof ready.nonce === 'string' ? ready.nonce : undefined,
+          detail: 'nonce-mismatch',
+        })
+        return
+      }
+      if (this.jobHandle === undefined) {
+        diagnostic.record('ready-invalid', { phase: 'T1', childPid: pid, detail: 'job-handle-missing' })
+        return
+      }
+      const sample = sampleChild(diagnostic.api, this.jobHandle, { pid })
+      const fields = childSampleFields(sample)
+      this.t1Child = { pid, creationTime: typeof fields.creationTime === 'string' ? fields.creationTime : undefined }
+      diagnostic.record('child-observed', {
+        ...fields,
+        phase: 'T1',
+        targetPid: this.targetPid,
+        nonce: typeof ready.nonce === 'string' ? ready.nonce : undefined,
+      })
+    } catch (error) {
+      diagnostic.record('ready-invalid', { phase: 'T1', detail: `observation-threw:${String(error)}` })
+    }
+  }
+
+  /**
+   * T2: re-sample the T1 child through the same Job handle once the direct
+   * target has exited, before the existing result and Job-empty handling runs.
+   */
+  private observeRootExit(): void {
+    const diagnostic = this.diagnostic
+    if (diagnostic === undefined || this.jobHandle === undefined) return
+    const t1 = this.t1Child
+    if (t1 === undefined) {
+      diagnostic.record('root-exit-observed', {
+        phase: 'T2',
+        targetPid: this.targetPid,
+        detail: 't1-child-not-observed',
+      })
+      return
+    }
+    try {
+      const sample = sampleChild(diagnostic.api, this.jobHandle, {
+        pid: t1.pid,
+        ...t1.creationTime === undefined ? {} : { expectedCreationTime: t1.creationTime },
+      })
+      diagnostic.record('root-exit-observed', {
+        ...childSampleFields(sample),
+        phase: 'T2',
+        targetPid: this.targetPid,
+        nonce: diagnostic.nonce,
+      })
+    } catch (error) {
+      diagnostic.record('root-exit-observed', {
+        phase: 'T2',
+        targetPid: this.targetPid,
+        detail: `observation-threw:${String(error)}`,
+      })
     }
   }
 
@@ -449,21 +633,30 @@ class WindowsJobRunner {
     try {
       await sendMessage(this.host, result)
       this.resultDelivered = true
+      this.diagnostic?.record('direct-result', {
+        state: result.type,
+        exitCode: result.type === 'target-exit' ? result.exitCode : null,
+        targetPid: this.targetPid,
+      })
     } catch {
       this.releaseOwnedJob()
-      this.finish(127, false)
+      this.finish(127, 'terminal-send-failed', false)
       return
     }
     if (exitCode !== undefined) {
-      this.finish(exitCode)
+      this.finish(exitCode, 'terminal-result-delivered')
       return
     }
-    if (this.jobHandle === undefined) this.finish(0)
+    if (this.jobHandle === undefined) this.finish(0, 'job-already-empty')
   }
 
   private async runnerFailure(error: unknown): Promise<void> {
     /* v8 ignore next -- callers stop/detach on finish; this guard contains only an already-queued internal callback. */
     if (this.finished) return
+    this.diagnostic?.record('runner-failure', {
+      targetPid: this.targetPid,
+      error: serializeRunnerError(error),
+    })
     if (!this.resultStarted) {
       this.resultStarted = true
       try {
@@ -474,7 +667,7 @@ class WindowsJobRunner {
       }
     }
     this.releaseOwnedJob()
-    this.finish(127)
+    this.finish(127, 'runner-failure')
   }
 
   private releaseOwnedJob(): void {
@@ -493,9 +686,16 @@ class WindowsJobRunner {
     }
   }
 
-  private finish(exitCode: number, disconnect = true): void {
+  /**
+   * Settle the runner exactly once.
+   * @param exitCode - process exit code reported to the host.
+   * @param callSource - real call site that settled the runner; recorded verbatim.
+   * @param disconnect - whether to close the IPC channel on settlement.
+   */
+  private finish(exitCode: number, callSource: string, disconnect = true): void {
     if (this.finished) return
     this.finished = true
+    this.diagnostic?.record('finish', { exitCode, callSource, targetPid: this.targetPid })
     if (this.pollTimer !== undefined) clearInterval(this.pollTimer)
     this.pollTimer = undefined
     this.host.off('message', this.onMessage)

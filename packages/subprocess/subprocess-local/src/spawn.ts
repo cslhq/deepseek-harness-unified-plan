@@ -20,7 +20,7 @@ import type {
   SubprocessOutputMode,
   SubprocessSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
-import type { BoundProcessOwner, ManagedProcessLaunch } from './managed-owner.ts'
+import type { BoundProcessOwner, ManagedProcessLaunch, ManagedRangeAnswer } from './managed-owner.ts'
 import { waitWithAbort } from './managed-owner.ts'
 import { controlEnvironment, controlPipe } from './control-spawn.ts'
 import { SUBPROCESS_CONTROL_FD } from '@deepseek-ai/dsh-subprocess/control'
@@ -77,6 +77,10 @@ export interface SpawnInternals {
 export interface LocalSubprocessHandle extends SubprocessHandle {
   /** Force-terminate the current tree synchronously without starting timers or waits. */
   terminateForHostExit(): void
+  /** Terminate and re-observe the managed range; absent on providers without one. */
+  terminateRange?(): Promise<ManagedRangeAnswer>
+  /** Observe the managed range without terminating it; absent on providers without one. */
+  verifyRange?(): Promise<ManagedRangeAnswer>
 }
 
 /**
@@ -442,6 +446,14 @@ export function bindManagedProcess(
     terminate,
     terminateForHostExit,
     waitForExit,
+    // The provider owns request de-duplication, so forwarding the bound methods
+    // keeps one shared settlement across kill, job teardown, and dispose.
+    ...launch.owner.terminateRange === undefined
+      ? {}
+      : { terminateRange: launch.owner.terminateRange.bind(launch.owner) },
+    ...launch.owner.verifyRange === undefined
+      ? {}
+      : { verifyRange: launch.owner.verifyRange.bind(launch.owner) },
   }
 }
 

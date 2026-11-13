@@ -3,6 +3,12 @@
 import type { Duplex, Readable, Writable } from 'node:stream'
 import type { SubprocessOutcome } from '@deepseek-ai/dsh-subprocess'
 
+/** One provider answer for a managed-range request. */
+export interface ManagedRangeAnswer {
+  readonly state: 'terminated' | 'empty' | 'partial' | 'unknown'
+  readonly evidence: readonly string[]
+}
+
 /** Platform owner used by termination and whole-range settlement. */
 export interface BoundProcessOwner {
   /** Signal the managed range; `cancellationReason` is used only before Windows target commit. */
@@ -18,6 +24,14 @@ export interface BoundProcessOwner {
   terminateForHostExit(): void
   /** Release provider-private protocol artifacts after outcome and range settlement. */
   cleanup?(): void
+  /**
+   * Terminate whatever the managed range still holds and report what it proved.
+   * Requests are provider-idempotent; the answer is never upgraded to a terminal
+   * state the provider did not observe.
+   */
+  terminateRange?(): Promise<ManagedRangeAnswer>
+  /** Re-observe the managed range without terminating anything. */
+  verifyRange?(): Promise<ManagedRangeAnswer>
 }
 
 /** Platform launch facts consumed by the common stdio and result lifecycle. */

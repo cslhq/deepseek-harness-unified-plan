@@ -60,6 +60,27 @@ export function runnerInvocationAvailable(invocation: RunnerInvocation = spawnRu
 }
 
 /**
+ * Diagnostic switches forwarded to the runner verbatim.
+ *
+ * The shared parent scrub removes every `DSH_*` entry, so an opt-in trace that
+ * the host exported would otherwise never reach the process that owns the Job.
+ */
+const RUNNER_DIAG_ENV_NAMES = [
+  'DSH_RUNNER_DIAG',
+  'DSH_RUNNER_DIAG_READY',
+  'DSH_RUNNER_DIAG_NONCE',
+] as const
+
+function runnerDiagnosticEnvironment(): Record<string, string> {
+  const forwarded: Record<string, string> = {}
+  for (const name of RUNNER_DIAG_ENV_NAMES) {
+    const value = process.env[name]
+    if (value !== undefined && value.length > 0) forwarded[name] = value
+  }
+  return forwarded
+}
+
+/**
  * Build the bootstrap-safe environment; target overrides arrive through request/IPC.
  * @param selection - private runner selector or Linux launch-request locator.
  * @param invocation - resolved runner invocation whose source form needs the workspace paths map.
@@ -81,6 +102,7 @@ export function runnerEnvironment(
     ...env,
     [SUBPROCESS_RUNNER_ENV]: selection,
     SYSTEMD_LOG_TARGET: 'null',
+    ...runnerDiagnosticEnvironment(),
     ...entry?.endsWith('.ts') === true ? { TSX_TSCONFIG_PATH: SOURCE_TSCONFIG_PATH } : {},
   }
 }

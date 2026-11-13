@@ -4,6 +4,7 @@ import { controlPipe } from './control-spawn.ts'
 import { spawn } from 'node:child_process'
 import { closeSync, openSync } from 'node:fs'
 import { devNull } from 'node:os'
+import { RangeRequester } from './windows-range.ts'
 import type { Readable, Writable } from 'node:stream'
 import type { SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import {
@@ -70,8 +71,8 @@ export function probeWindowsJob(internals: WindowsJobInternals = {}): boolean {
 /** What one range termination attempt proved about the managed range. */
 export interface RangeTerminationResult {
   readonly state: 'terminated' | 'empty' | 'partial' | 'unknown'
-  readonly activeBefore?: number
-  readonly activeAfter?: number
+  readonly activeBefore?: number | undefined
+  readonly activeAfter?: number | undefined
   readonly evidence: readonly string[]
 }
 
@@ -79,8 +80,7 @@ class WindowsJobOwner implements BoundProcessOwner {
   private cancellationReason: unknown
   private cancellationReasonSet = false
   private terminationSent = false
-  private rangeTermination?: Promise<RangeTerminationResult>
-  private rangeSequence = 0
+  private readonly ranges: RangeRequester
 
   constructor(
     private readonly runner: RunnerProcess,
@@ -89,6 +89,17 @@ class WindowsJobOwner implements BoundProcessOwner {
     private readonly failInfrastructure: (error: unknown) => void,
   ) {
     void this.exited.catch(() => {})
+    this.ranges = new RangeRequester({
+      send: (message) => { this.runner.send?.(message as never) },
+      onMessage: (listener) => { this.runner.on('message', listener) },
+      offMessage: (listener) => { this.runner.off('message', listener) },
+    })
+    // The derived promise repeats the rejection only to observe completion: the
+    // rejection itself stays owned by waitForExit(), so it must not surface again
+    // as an unhandled one on every infrastructure-failure path.
+    void this.exited
+      .finally(() => { this.ranges.runnerGone('runner-exit') })
+      .catch(() => {})
   }
 
   signal(_signal: 'SIGTERM' | 'SIGKILL', cancellationReason?: unknown): void {
@@ -126,50 +137,19 @@ class WindowsJobOwner implements BoundProcessOwner {
    * to re-observe the active count, so a successful request is never mistaken
    * for an empty range. Concurrent and repeated calls share one settlement.
    */
-  terminateRange(timeoutMs = 5_000): Promise<RangeTerminationResult> {
-    this.rangeTermination ??= this.runRangeTermination(timeoutMs)
-    return this.rangeTermination
+  bindIdentity(jobId: string, instanceId: string): void {
+    this.ranges.bindIdentity(jobId, instanceId)
   }
 
-  private runRangeTermination(timeoutMs: number): Promise<RangeTerminationResult> {
-    if (this.directResultType() !== undefined && !this.runner.connected) {
-      return Promise.resolve({ state: 'unknown', evidence: ['runner-disconnected'] })
-    }
-    const id = ++this.rangeSequence
-    return new Promise<RangeTerminationResult>((resolve) => {
-      let settled = false
-      const finish = (result: RangeTerminationResult): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        this.runner.off?.('message', onMessage)
-        resolve(result)
-      }
-      const timer = setTimeout(() => {
-        finish({ state: 'unknown', evidence: [`no-ack:${String(timeoutMs)}ms`] })
-      }, timeoutMs)
-      const onMessage = (value: unknown): void => {
-        const reply = value as { type?: string; id?: number; active?: number; terminated?: boolean }
-        if (reply.type !== 'range-result' || reply.id !== id) return
-        const active = typeof reply.active === 'number' ? reply.active : undefined
-        const evidence = [`active-after:${String(active)}`, `terminated:${String(reply.terminated)}`]
-        if (active === undefined) {
-          finish({ state: 'unknown', evidence })
-          return
-        }
-        finish({ state: active === 0 ? (reply.terminated === true ? 'terminated' : 'empty') : 'partial', activeAfter: active, evidence })
-      }
-      this.runner.on('message', onMessage)
-      try {
-        this.runner.send?.({ type: 'terminate-range', id }, (error) => {
-          if (error === null || error === undefined) return
-          finish({ state: 'unknown', evidence: [`send-failed:${String(error)}`] })
-        })
-      } catch (error) {
-        finish({ state: 'unknown', evidence: [`send-threw:${String(error)}`] })
-      }
-    })
+  terminateRange(timeoutMs = 5_000): Promise<RangeTerminationResult> {
+    return this.ranges.terminateRange(timeoutMs)
   }
+
+  /** Pure re-observation of the managed range; never terminates. */
+  verifyRange(timeoutMs = 5_000): Promise<RangeTerminationResult> {
+    return this.ranges.verifyRange(timeoutMs)
+  }
+
 
   terminateForHostExit(): void {
     try { this.runner.kill('SIGKILL') } catch { /* Host exit continues with other live runners. */ }
@@ -243,28 +223,51 @@ export function launchWindowsJob(
     () => directResultType,
     failInfrastructure,
   )
+  let startedSeen = false
+  const failProtocol = (message: string): void => {
+    failInfrastructure(new Error(`subprocess-local: ${message}`))
+    owner.terminateForHostExit()
+  }
   child.on('message', (value: unknown) => {
-    if (directResultType !== undefined) {
-      const error = new Error('subprocess-local: Windows runner emitted more than one direct result')
-      failInfrastructure(error)
-      owner.terminateForHostExit()
+    const message = value as { type?: unknown; jobId?: unknown; instanceId?: unknown } | null
+    const type = message !== null && typeof message === 'object' ? message.type : undefined
+    if (type === 'started') {
+      if (startedSeen) { failProtocol('runner sent more than one started handshake'); return }
+      startedSeen = true
+      if (typeof message?.jobId !== 'string' || typeof message.instanceId !== 'string') {
+        failProtocol('started handshake carries no job/instance identity')
+        return
+      }
+      owner.bindIdentity(message.jobId, message.instanceId)
       return
     }
-    let result: ReturnType<typeof parseWindowsRunnerResult>
-    try {
-      result = parseWindowsRunnerResult(value)
-    } catch (error) {
-      failInfrastructure(error)
-      owner.terminateForHostExit()
+    if (type === 'range-result' || type === 'verify-result') {
+      // Consumed by the RangeRequester listeners; never a direct result.
       return
     }
-    directResultType = result.type
-    if (result.type === 'target-exit') {
-      direct.resolve({ exitCode: result.exitCode, signal: null })
-    } else {
-      direct.reject(owner.mapStartFailure(deserializeRunnerError(result.error), result.error))
+    if (type === 'protocol-error') {
+      // The runner reports malformed requests here; keep the range channel alive.
+      return
     }
-    settleRange()
+    if (type === 'target-exit' || type === 'error') {
+      if (directResultType !== undefined) { failProtocol('runner emitted more than one direct result'); return }
+      let result: ReturnType<typeof parseWindowsRunnerResult>
+      try {
+        result = parseWindowsRunnerResult(value)
+      } catch (error) {
+        failProtocol(String(error))
+        return
+      }
+      directResultType = result.type
+      if (result.type === 'target-exit') {
+        direct.resolve({ exitCode: result.exitCode, signal: null })
+      } else {
+        direct.reject(owner.mapStartFailure(deserializeRunnerError(result.error), result.error))
+      }
+      settleRange()
+      return
+    }
+    failProtocol(`unknown runner message type ${String(type)}`)
   })
   child.once('spawn', () => {
     runnerSpawned = true

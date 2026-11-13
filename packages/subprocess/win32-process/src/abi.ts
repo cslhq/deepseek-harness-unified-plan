@@ -46,6 +46,16 @@ export const JOBOBJECT_BASIC_ACCOUNTING_ACTIVE_PROCESSES_OFFSET = 40
 export const JOBOBJECT_EXTENDED_LIMIT_SIZE = 144
 /** Byte offset of BasicLimitInformation.LimitFlags in the extended Job record. */
 export const JOBOBJECT_EXTENDED_LIMIT_FLAGS_OFFSET = 16
+/** Access right permitting a limited query of one process's identity and times. */
+export const PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
+/** Access right permitting a zero-time wait on one process handle. */
+export const SYNCHRONIZE = 0x00100000
+/** WaitForSingleObject returned because the object was signalled. */
+export const WAIT_OBJECT_0 = 0x00000000
+/** WaitForSingleObject returned after an internal failure; GetLastError carries the reason. */
+export const WAIT_FAILED = 0xFFFFFFFF
+/** x64 FILETIME byte size: two 32-bit halves of one 64-bit timestamp. */
+export const FILETIME_SIZE = 8
 /** x64 STARTUPINFOW byte size verified by the native probe. */
 export const STARTUPINFOW_SIZE = 104
 /** x64 PROCESS_INFORMATION byte size verified by the native probe. */

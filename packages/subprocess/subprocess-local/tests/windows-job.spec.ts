@@ -7,6 +7,8 @@ import {
   probeWindowsJob,
 } from '../src/windows-job.ts'
 import { bindManagedProcess } from '../src/spawn.ts'
+import type { BoundProcessOwner } from '../src/managed-owner.ts'
+import type { RangeAnswer } from '../src/windows-range.ts'
 
 class FakeChild extends EventEmitter {
   pid: number | undefined = 432
@@ -399,6 +401,30 @@ describe('Windows parent runner contract', () => {
     await expect(nonErrorResult.owner.waitForExit()).rejects.toBe('start send failed')
   })
 
+  it('keeps a rejected range exit observable without surfacing an unhandled rejection', async () => {
+    const unhandled: unknown[] = []
+    // Detection only: Vitest keeps its own listener, so an unhandled rejection
+    // still fails the run — this records it for the assertion below as well.
+    const record = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', record)
+    try {
+      const { child, result } = launch()
+      const failure = new Error('runner failed after spawn')
+      child.emit('error', failure)
+
+      // Both promises reject with the original error: the direct result...
+      await expect(result.direct).rejects.toBe(failure)
+      // ...and the owner's exit observation, which owns the range rejection.
+      await expect(result.owner.waitForExit()).rejects.toBe(failure)
+      // Give the queue its chance to report the finally-derived chain.
+      await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+      await new Promise<void>((resolveImmediate) => { setImmediate(resolveImmediate) })
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', record)
+    }
+  })
+
   it('fails infrastructure and kills the runner when termination delivery fails', async () => {
     const callback = launch()
     await Promise.resolve()
@@ -477,5 +503,60 @@ describe('Windows parent runner contract', () => {
     expect(child.sent.filter(message => (message as { type?: string }).type === 'terminate')).toHaveLength(1)
     result.owner.terminateForHostExit()
     expect(child.killed).toEqual(['SIGKILL'])
+  })
+})
+
+/** The Windows owner exposes range requests on top of the shared owner contract. */
+interface RangeOwner extends BoundProcessOwner {
+  terminateRange(timeoutMs?: number): Promise<RangeAnswer>
+  verifyRange(timeoutMs?: number): Promise<RangeAnswer>
+}
+
+describe('Windows parent range channel', () => {
+  it('keeps range replies out of the direct result channel', async () => {
+    const { child, result } = launch()
+    let settled = false
+    void result.direct.then(() => { settled = true }, () => { settled = true })
+
+    child.emit('message', { type: 'range-result', requestId: 1, jobId: 'job-1', instanceId: 'inst-1', state: 'terminated', evidence: [] })
+    child.emit('message', { type: 'verify-result', requestId: 2, jobId: 'job-1', instanceId: 'inst-1', state: 'empty', evidence: [] })
+    await Promise.resolve()
+    // A range envelope is never a direct outcome, neither success nor failure.
+    expect(settled).toBe(false)
+
+    child.emit('message', { type: 'target-exit', exitCode: 4 })
+    await expect(result.direct).resolves.toEqual({ exitCode: 4, signal: null })
+  })
+
+  it('answers an owner range request only from the range channel', async () => {
+    const { child, result } = launch()
+    child.emit('message', { type: 'started', jobId: 'job-1', instanceId: 'inst-1' })
+    const owner = result.owner as RangeOwner
+
+    const pending = owner.verifyRange(500)
+    let rangeSettled = false
+    void pending.then(() => { rangeSettled = true }, () => { rangeSettled = true })
+    expect(child.sent).toContainEqual({ type: 'verify-range', requestId: 1 })
+
+    // A valid direct result travels the other channel and must not answer the range request.
+    child.emit('message', { type: 'target-exit', exitCode: 0 })
+    await expect(result.direct).resolves.toEqual({ exitCode: 0, signal: null })
+    await Promise.resolve()
+    expect(rangeSettled).toBe(false)
+
+    child.emit('message', { type: 'verify-result', requestId: 1, jobId: 'job-1', instanceId: 'inst-1', state: 'partial', evidence: ['verify:false'] })
+    await expect(pending).resolves.toMatchObject({ state: 'partial', evidence: ['verify:false'] })
+  })
+
+  it('rejects a range answer belonging to another Job at the owner seam', async () => {
+    const { child, result } = launch()
+    child.emit('message', { type: 'started', jobId: 'job-1', instanceId: 'inst-1' })
+    const owner = result.owner as RangeOwner
+
+    const pending = owner.terminateRange(500)
+    expect(child.sent).toContainEqual({ type: 'terminate-range', requestId: 1 })
+    child.emit('message', { type: 'range-result', requestId: 1, jobId: 'job-2', instanceId: 'inst-1', state: 'terminated', evidence: [] })
+
+    await expect(pending).resolves.toEqual({ state: 'unknown', evidence: ['job-id-mismatch'] })
   })
 })
