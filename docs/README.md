@@ -18,4 +18,4 @@ This directory documents the **unofficial personal fork** that carries the D1–
 
 - Every number on these pages comes from a recorded run on this branch; nothing is projected or estimated.
 - Where evidence is layered (unit + protocol + product) rather than end-to-end, the page says so explicitly.
-- `CONTRIBUTING.md` is **not** modified: it remains the upstream document. Local conventions for this fork are recorded in this index and in [development/windows.md](development/windows.md).
+- `CONTRIBUTING.md` keeps the upstream body unchanged; a personal-branch note is appended at the end of the file. Local conventions for this fork are recorded in this index and in [development/windows.md](development/windows.md).

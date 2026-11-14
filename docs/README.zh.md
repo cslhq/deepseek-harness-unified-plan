@@ -18,4 +18,4 @@
 
 - 本目录中的每个数字都来自本分支的一次真实运行记录，没有任何预测或估算。
 - 当证据是分层的（单元 + 协议 + 产品）而非端到端时，页面会明确说明。
-- `CONTRIBUTING.md` **未**修改，仍是上游文档；本分支的本地约定记录在此索引与 [development/windows.zh.md](development/windows.zh.md) 中。
+- `CONTRIBUTING.md` 的上游正文保持不变，仅在文件末尾追加个人开发分支说明；本分支的本地约定记录在此索引与 [development/windows.zh.md](development/windows.zh.md) 中。
