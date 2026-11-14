@@ -1,16 +1,15 @@
-# D7-R2 final acceptance (branch head `0b01642f`)
+# D7-R2 final acceptance (branch head at the D7-R2 acceptance run)
 
-本页记录本分支 HEAD 的验收运行。所有数字来自洁净工作树（删除
-`*.tsbuildinfo`、独立 `pnpm install`），不是增量结果。
+本页记录本分支 HEAD 的验收运行。所有数字来自洁净工作树（删除 `*.tsbuildinfo`、独立 `pnpm install`），不是增量结果。
 
 ## 提交
 
 | 提交 | 内容 |
 | --- | --- |
-| `506316c8` | Windows Job range：host 请求器、runner 侧处理、句柄面 `terminateRange`/`verifyRange` |
-| `b477fe96` | 类型修复（sandbox 声明、`waitForManagedRange` 兼容）+ 10 个测试桩适配 |
-| `1346af91` | `waitForExit` 成为必填契约、`settleManagedRange`、两个方言接线、`CHANGELOG.md` |
-| `0b01642f` | 作业结算：`residue → failed`；平台感知的 `kill()` 断言 |
+| C1（subprocess） | Windows Job range：host 请求器、runner 侧处理、句柄面 `terminateRange`/`verifyRange` |
+| C2A（修复） | 类型修复（sandbox 声明、`waitForManagedRange` 兼容）+ 10 个测试桩适配 |
+| C2B（shell） | `waitForExit` 成为必填契约、`settleManagedRange`、两个方言接线、`CHANGELOG.md` |
+| C3（tools） | 作业结算：`residue → failed`；平台感知的 `kill()` 断言 |
 
 ## Windows（洁净工作树）
 
@@ -62,7 +61,4 @@ P-07（`TerminateJobObject` 失败）**没有**产品级故障注入。证据是
 
 ## 决策记录：不给 Job 增加 ResidueKind
 
-Job 是匿名内核对象，句柄只存在于 runner；runner 退出即触发
-`KILL_ON_JOB_CLOSE`，对象随之销毁。持久化记录无法"重新打开"一个 Job，因此
-D4 的 `ResidueKind`（`acl-grant` / `acl-sandbox` / `temp-dir`）**不**扩展进程类型；
-Job 的清空由 `KILL_ON_JOB_CLOSE` 保证，验收时以"后代进程确实消失"作为证据。
+Job 是匿名内核对象，句柄只存在于 runner；runner 退出即触发 `KILL_ON_JOB_CLOSE`，对象随之销毁。持久化记录无法"重新打开"一个 Job，因此 D4 的 `ResidueKind`（`acl-grant` / `acl-sandbox` / `temp-dir`）**不**扩展进程类型；Job 的清空由 `KILL_ON_JOB_CLOSE` 保证，验收时以"后代进程确实消失"作为证据。
