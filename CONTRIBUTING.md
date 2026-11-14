@@ -21,3 +21,18 @@ DeepSeek Harness is designed to be deeply customizable. We do not believe that p
 We have already seen exciting projects emerge from the community, and we hope to see the ecosystem continue to grow in its own directions.
 
 Into the unknown.
+
+---
+
+## Personal development branch (unofficial)
+
+This branch (audit/d7-r2-integration, maintained by [@cslhq](https://github.com/cslhq))
+is **not** the official DeepSeek Harness repository. It carries the unified D1-D7
+process-lifecycle work reviewed in docs/validation/d7-r2-final-acceptance.md.
+
+- Upstream project and official contribution rules:
+  [DeepSeek-ai/DeepSeek-Harness](https://github.com/DeepSeek-ai/DeepSeek-Harness).
+- Everything above this section is the upstream document, unchanged.
+- Branch-specific conventions (hook behaviour, clean-build checks, platform-gated
+  suites) are recorded in docs/development/windows.md and docs/README.md.
+- License: MIT, see LICENSE and THIRD_PARTY_NOTICES.md.

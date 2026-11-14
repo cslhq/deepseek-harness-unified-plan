@@ -1,5 +1,7 @@
 # The shell managed-range contract (D6 + D7)
 
+> 中文：[shell-managed-range-contract.zh.md](shell-managed-range-contract.zh.md)
+
 `ShellProcess` 描述的不只是"一个进程"，而是"一个可以比直连进程活得更久的
 受管范围"。Windows 上它是 Job 对象，POSIX 上是进程组。
 

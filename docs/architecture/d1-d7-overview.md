@@ -1,5 +1,7 @@
 # D1–D7: unified process lifecycle
 
+> 中文：[d1-d7-overview.zh.md](d1-d7-overview.zh.md)
+
 七个子系统共同回答一个问题：**一个受管进程范围（Windows Job、POSIX 进程组）
 在什么情况下才算真正释放干净**。前六个 D 各自解决一侧的资源治理，D7 把
 Shell / Tool / Runner 三层接到同一套语义上。
@@ -20,11 +22,11 @@ Shell / Tool / Runner 三层接到同一套语义上。
 
 ```mermaid
 flowchart TD
-  Tool["tool-bash / tool-pwsh<br/>processJob"] --> Settle["settleManagedRange<br/>(dsh-shell)"]
-  Settle -->|probe: waitForExit(250ms)| Range
+  Tool["tool-bash / tool-pwsh<br/>processJob"] --> Settle["settleManagedRange<br/>dsh-shell"]
+  Settle -->|"probe waitForExit 250ms"| Range
   Settle -->|verifyRange| Range
   Settle -->|terminateRange| Range
-  Settle -->|proof: waitForExit(5s)| Range
+  Settle -->|"proof waitForExit 5s"| Range
   Range["受管范围<br/>Windows Job / POSIX 组"] --> Runner["subprocess-local runner<br/>(win32-process bindings)"]
   Runner -->|started + bindIdentity| Host["host RangeRequester"]
   Host -->|terminate-range / verify-range| Runner

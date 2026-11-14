@@ -1,5 +1,7 @@
 # Windows Job / runner lifecycle
 
+> 中文：[windows-job-runner-lifecycle.zh.md](windows-job-runner-lifecycle.zh.md)
+
 Windows 上没有 POSIX 进程组。DSH 用 **Job object** 作为"受管范围"：Job 里的任何
 成员都随 Job 一起被约束，`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 保证最后一个句柄
 关闭时成员被终止。
