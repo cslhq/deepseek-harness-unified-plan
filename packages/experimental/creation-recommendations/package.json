@@ -53,7 +53,7 @@
   },
   "dependencies": {
     "yaml": "^2.9.0",
-    "resolve.exports": "^2.0.3",
+    "resolve.exports": "^2.0.4",
     "zod": "4.4.3",
     "@deepseek-ai/dsh-client-ui-creation-recommendations": "workspace:*",
     "@deepseek-ai/dsh-action-cards": "workspace:*",
