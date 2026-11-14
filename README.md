@@ -1,11 +1,4 @@
-> **Unofficial personal development branch.** Maintained by [@cslhq](https://github.com/cslhq) for the
-> unified D1–D7 process-lifecycle work. Upstream:
-> [DeepSeek-ai/DeepSeek-Harness](https://github.com/DeepSeek-ai/DeepSeek-Harness). MIT licensed; see
-> [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-> Branch docs start at [`docs/README.md`](docs/README.md).
->
-> **非官方个人开发分支**：承载 D1–D7 生命周期统一化工作，原始项目为 DeepSeek-ai/DeepSeek-Harness。
-> 文档入口见 [`docs/README.md`](docs/README.md)。
+> **Unofficial personal development branch.** Maintained by [@cslhq](https://github.com/cslhq) for the unified D1–D7 process-lifecycle work. Upstream: [DeepSeek-ai/DeepSeek-Harness](https://github.com/DeepSeek-ai/DeepSeek-Harness). MIT licensed; see [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Branch docs start at [`docs/README.md`](docs/README.md).
 
 # DeepSeek Harness
 

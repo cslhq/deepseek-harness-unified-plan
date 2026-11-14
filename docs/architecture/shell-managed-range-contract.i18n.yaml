@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for shell-managed-range-contract.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/architecture/shell-managed-range-contract.md
+/the-shell-managed-range-contract-d6-d7:
+  en: d73df7ecacd727a3
+  zh: 78a7ccf1eb5f325e
+/the-shell-managed-range-contract-d6-d7/section:
+  en: 6fbd9c2ab5828b09
+  zh: befe4464dc13e5a7
+/the-shell-managed-range-contract-d6-d7/waitforexit:
+  en: f37ad4b56f4a3fac
+  zh: c61745e76d88713b
+/the-shell-managed-range-contract-d6-d7/settlemanagedrange:
+  en: dccdb17105a99cd8
+  zh: dccdb17105a99cd8
+/the-shell-managed-range-contract-d6-d7/executor:
+  en: ae938cc15e5e4f36
+  zh: ae938cc15e5e4f36

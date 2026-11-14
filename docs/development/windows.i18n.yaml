@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for windows.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/development/windows.md
+/development-on-windows:
+  en: d649d4d354253247
+  zh: 6906d4a8ec44fe18
+/development-on-windows/section:
+  en: 4dc202733205e681
+  zh: 4dc202733205e681
+/development-on-windows/section~2:
+  en: 325de1474d090f5a
+  zh: 325de1474d090f5a
+/development-on-windows/section~3:
+  en: c43c7c790a6cfdd8
+  zh: c43c7c790a6cfdd8
+/development-on-windows/section~4:
+  en: 124e438d8bfaadf0
+  zh: 124e438d8bfaadf0

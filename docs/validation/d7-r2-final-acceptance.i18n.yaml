@@ -1,0 +1,25 @@
+# Bilingual-pair consistency record for d7-r2-final-acceptance.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/validation/d7-r2-final-acceptance.md
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run:
+  en: f2d848c2ffd466b0
+  zh: bf387a031182fe47
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run/section:
+  en: dcc47d5de64faf0e
+  zh: dcc47d5de64faf0e
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run/windows:
+  en: 28bd63d1983ba693
+  zh: 28bd63d1983ba693
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run/linux-wsl-node-24-19-0-pnpm-11-28-5:
+  en: d85ab9120ebbef70
+  zh: d85ab9120ebbef70
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run/section~2:
+  en: 5f622e40141d958c
+  zh: 5f622e40141d958c
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run/p-07:
+  en: a40cf738b91c24e2
+  zh: a40cf738b91c24e2
+/d7-r2-final-acceptance-branch-head-at-the-d7-r2-acceptance-run/job-residuekind:
+  en: acf7763a4ceddf84
+  zh: acf7763a4ceddf84

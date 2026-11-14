@@ -1,5 +1,7 @@
 # Known limitations and open risks
 
+English | [中文](known-limitations.zh.md)
+
 Nothing here is hypothetical: each entry names the code that carries it and the evidence that established it.
 
 ## R21 — settlement bounds are constants

@@ -1,10 +1,8 @@
 # Windows Job / Runner 生命周期
 
-> English: [windows-job-runner-lifecycle.md](windows-job-runner-lifecycle.md)
+[English](windows-job-runner-lifecycle.md) | 中文
 
-Windows 上没有 POSIX 进程组。DSH 用 **Job object** 作为"受管范围"：Job 里的任何
-成员都随 Job 一起被约束，`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 保证最后一个句柄
-关闭时成员被终止。
+Windows 上没有 POSIX 进程组。DSH 用 **Job object** 作为"受管范围"：Job 里的任何成员都随 Job 一起被约束，`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 保证最后一个句柄关闭时成员被终止。
 
 ## 谁拥有什么
 
@@ -24,19 +22,13 @@ sequenceDiagram
   Participant Runner-Job 目标退出 → runner 观察 ActiveProcesses=0 → finish(0)
 ```
 
-- **Job 是匿名的**：`CreateJobObjectW(null, null)`。`jobId` 只是协议标识，不是内核
-  名字；无法凭 `jobId` 重新打开一个已销毁的 Job。
-- **唯一句柄属于 runner**。runner 结束时内核关闭句柄 → `KILL_ON_JOB_CLOSE` 触发
-  → 残留成员被终止。已由产品级 E2E 验证：杀掉 runner 后，原本存活的后代进程
-  消失（`childGone = true`）。
-- **host 只能请求，不能直接操作 Job**。所有 range 操作都是 IPC：`terminate-range`、
-  `verify-range`，应答带 `state` 与 `evidence`。
+- **Job 是匿名的**：`CreateJobObjectW(null, null)`。`jobId` 只是协议标识，不是内核名字；无法凭 `jobId` 重新打开一个已销毁的 Job。
+- **唯一句柄属于 runner**。runner 结束时内核关闭句柄 → `KILL_ON_JOB_CLOSE` 触发→ 残留成员被终止。已由产品级 E2E 验证：杀掉 runner 后，原本存活的后代进程消失（`childGone = true`）。
+- **host 只能请求，不能直接操作 Job**。所有 range 操作都是 IPC：`terminate-range`、 `verify-range`，应答带 `state` 与 `evidence`。
 
 ## 身份绑定（fail-closed）
 
-Range 请求只在 `started` 握手完成、且 `jobId` 与 `instanceId` 都绑定后才允许发出。
-未绑定 → `state: 'unknown'`、`evidence: ['identity-unbound']`，**不发 IPC**。runner
-断连 → 所有在途请求解析为 `unknown` + `runner-disconnected`。
+Range 请求只在 `started` 握手完成、且 `jobId` 与 `instanceId` 都绑定后才允许发出。未绑定 → `state: 'unknown'`、`evidence: ['identity-unbound']`，**不发 IPC**。runner断连 → 所有在途请求解析为 `unknown` + `runner-disconnected`。
 
 ## 状态映射
 

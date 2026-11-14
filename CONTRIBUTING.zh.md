@@ -21,3 +21,12 @@ DeepSeek Harness 的设计支持深度定制。我们并不认为官方仓库中
 我们已经看到社区中涌现出令人期待的项目，也希望生态系统继续沿着自己的方向发展。
 
 探索未至之境。
+
+## 个人开发分支（非官方）
+
+本分支（audit/d7-r2-integration，由 [@cslhq](https://github.com/cslhq) 维护）**不是** DeepSeek Harness 的官方仓库，承载 D1–D7 进程生命周期统一化工作，验收记录见 docs/validation/d7-r2-final-acceptance.zh.md。
+
+- 上游项目与官方贡献规则：[DeepSeek-ai/DeepSeek-Harness](https://github.com/DeepSeek-ai/DeepSeek-Harness)。
+- 本节之上的内容为上游文档，未作改动。
+- 分支约定（钩子行为、洁净构建检查、平台受限套件）见 docs/development/windows.zh.md 与 docs/README.zh.md。
+- 许可：MIT，见 LICENSE 与 THIRD_PARTY_NOTICES.md。

@@ -1,0 +1,28 @@
+# Bilingual-pair consistency record for known-limitations.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/known-limitations.md
+/known-limitations-and-open-risks:
+  en: 2ce06d030a1e5468
+  zh: 4329ff584ef07939
+/known-limitations-and-open-risks/r21-settlement-bounds-are-constants:
+  en: 4483837e63f118cd
+  zh: 91695482108ee69c
+/known-limitations-and-open-risks/r23-landlock-runtime-behaviour-is-not-exercised-end-to-end:
+  en: 053809bd5e795eca
+  zh: 678274d098305e96
+/known-limitations-and-open-risks/r24-no-product-level-fault-injection:
+  en: bbe6e7f9913b8034
+  zh: 675276325098c7bf
+/known-limitations-and-open-risks/r25-a-provider-that-resolves-false-would-be-ignored:
+  en: 99c016e1c9c1bc69
+  zh: 7d7923cbe3b3170e
+/known-limitations-and-open-risks/windows-acl-baseline-failures:
+  en: 33159de423509e05
+  zh: 0dffd0b9f5a750b5
+/known-limitations-and-open-risks/platform-gated-suites:
+  en: 025aec87cd74cad1
+  zh: fad6e34504d19af1
+/known-limitations-and-open-risks/c2a-was-committed-with-no-verify:
+  en: b2bd68e3add74770
+  zh: 22a78d0f46fdfa5b

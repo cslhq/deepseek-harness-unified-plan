@@ -1,8 +1,8 @@
 # Documentation index — unified D1–D7 branch
 
-This directory documents the **unofficial personal fork** that carries the
-D1–D7 process-lifecycle work. Upstream documentation under this tree is kept
-unchanged; the pages below are additions.
+English | [中文](README.zh.md)
+
+This directory documents the **unofficial personal fork** that carries the D1–D7 process-lifecycle work. Upstream documentation under this tree is kept unchanged; the pages below are additions.
 
 | Page | What it answers |
 | --- | --- |
@@ -16,10 +16,6 @@ unchanged; the pages below are additions.
 
 ## Scope and honesty rules
 
-- Every number on these pages comes from a recorded run on this branch; nothing
-  is projected or estimated.
-- Where evidence is layered (unit + protocol + product) rather than end-to-end,
-  the page says so explicitly.
-- `CONTRIBUTING.md` is **not** modified: it remains the upstream document. Local
-  conventions for this fork are recorded in this index and in
-  [development/windows.md](development/windows.md).
+- Every number on these pages comes from a recorded run on this branch; nothing is projected or estimated.
+- Where evidence is layered (unit + protocol + product) rather than end-to-end, the page says so explicitly.
+- `CONTRIBUTING.md` is **not** modified: it remains the upstream document. Local conventions for this fork are recorded in this index and in [development/windows.md](development/windows.md).

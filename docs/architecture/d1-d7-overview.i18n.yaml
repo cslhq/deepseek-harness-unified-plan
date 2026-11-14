@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for d1-d7-overview.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/architecture/d1-d7-overview.md
+/d1-d7-unified-process-lifecycle:
+  en: 7964c3f575c227a5
+  zh: 7779dd94b538d086
+/d1-d7-unified-process-lifecycle/section:
+  en: 9a8dacde4e3c62e5
+  zh: ea1d07bf2d456d8c
+/d1-d7-unified-process-lifecycle/section~2:
+  en: d991b5bca1327cee
+  zh: d991b5bca1327cee
+/d1-d7-unified-process-lifecycle/section~3:
+  en: 06721145c0fd56ae
+  zh: 256d9ae26ac4d9ae
+/d1-d7-unified-process-lifecycle/d1-d5:
+  en: cf57f3384040f840
+  zh: b37c290bc8dfe004

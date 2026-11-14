@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for linux-wsl.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/development/linux-wsl.md
+/development-on-linux-wsl:
+  en: 37ce23bbbafbb642
+  zh: 458f1a9ca12841fa
+/development-on-linux-wsl/section:
+  en: 1d6e6e58c922e58f
+  zh: 1d6e6e58c922e58f
+/development-on-linux-wsl/native-system:
+  en: 32e5921b79d2d0e3
+  zh: 3d72e26033fa7d62
+/development-on-linux-wsl/section~2:
+  en: 5cc833a09fc89bcd
+  zh: 5cc833a09fc89bcd
+/development-on-linux-wsl/windows:
+  en: 39e27462c3a09633
+  zh: 39e27462c3a09633

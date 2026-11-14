@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for windows-job-runner-lifecycle.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/architecture/windows-job-runner-lifecycle.md
+/windows-job-runner-lifecycle:
+  en: a387bcada0ba5d1f
+  zh: eb96fc94c700759c
+/windows-job-runner-lifecycle/section:
+  en: 79383fc35cac71dc
+  zh: 8f6fe384b10251f0
+/windows-job-runner-lifecycle/fail-closed:
+  en: 11b52480d3a8622c
+  zh: 11b52480d3a8622c
+/windows-job-runner-lifecycle/section~2:
+  en: f37342e87645d2b6
+  zh: f37342e87645d2b6
+/windows-job-runner-lifecycle/section~3:
+  en: 50ec60e57ea24b25
+  zh: dc3c247d8df09acf

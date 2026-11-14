@@ -2,9 +2,12 @@
 # section, a hash of its English and Chinese blocks outside code blocks and generated regions.
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write README.md
+/:
+  en: d2b35f5de25eaff8
+  zh: e3b0c44298fc1c14
 /deepseek-harness:
   en: f68c4f080ce55ff2
-  zh: 88a76d7f7f0b260e
+  zh: b0c262c77850c5ba
 /deepseek-harness/developer-preview:
   en: 4ef4d8a71ac143f0
   zh: 1bfc3149ba8e5543

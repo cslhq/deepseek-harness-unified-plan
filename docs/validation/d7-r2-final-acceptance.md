@@ -1,5 +1,7 @@
 # D7-R2 final acceptance (branch head at the D7-R2 acceptance run)
 
+English | [中文](d7-r2-final-acceptance.zh.md)
+
 本页记录本分支 HEAD 的验收运行。所有数字来自洁净工作树（删除 `*.tsbuildinfo`、独立 `pnpm install`），不是增量结果。
 
 ## 提交

@@ -1,10 +1,8 @@
 # D1–D7: unified process lifecycle
 
-> 中文：[d1-d7-overview.zh.md](d1-d7-overview.zh.md)
+English | [中文](d1-d7-overview.zh.md)
 
-七个子系统共同回答一个问题：**一个受管进程范围（Windows Job、POSIX 进程组）
-在什么情况下才算真正释放干净**。前六个 D 各自解决一侧的资源治理，D7 把
-Shell / Tool / Runner 三层接到同一套语义上。
+七个子系统共同回答一个问题：**一个受管进程范围（Windows Job、POSIX 进程组）在什么情况下才算真正释放干净**。前六个 D 各自解决一侧的资源治理，D7 把Shell / Tool / Runner 三层接到同一套语义上。
 
 ## 职责分工
 
@@ -38,19 +36,11 @@ flowchart TD
 
 ## 核心不变量
 
-1. **Root `done` ≠ range empty。** `ShellProcess.done` 只结算直连进程；后代仍可能
-   活在 Job 里。仓库里唯一的"范围已空"证据是 `waitForExit() === true`。
-2. **不可证 ≠ 已清空。** `unknown` / `partial` / ACK 超时 / runner 断连都不得映射为
-   `empty`（见 [shell-managed-range-contract.md](shell-managed-range-contract.md)）。
-3. **观察与终止分离。** `verifyRange` 只观察；`terminateRange` 才终止；
-   `waitForExit` 只等待。
-4. **residue → failed。** 作业只有在范围被证明清空后才允许 `completed`；否则
-   `processOutcome` 返回 `failed` 并带证据。
+1. **Root `done` ≠ range empty。** `ShellProcess.done` 只结算直连进程；后代仍可能活在 Job 里。仓库里唯一的"范围已空"证据是 `waitForExit() === true`。
+2. **不可证 ≠ 已清空。** `unknown` / `partial` / ACK 超时 / runner 断连都不得映射为`empty`（见 [shell-managed-range-contract.md](shell-managed-range-contract.md)）。
+3. **观察与终止分离。** `verifyRange` 只观察；`terminateRange` 才终止；`waitForExit` 只等待。
+4. **residue → failed。** 作业只有在范围被证明清空后才允许 `completed`；否则`processOutcome` 返回 `failed` 并带证据。
 
 ## 与 D1–D5 的边界
 
-D1–D5 管的是**文件系统资源**（ACL、临时目录、SID、隔离记录），D7 管的是
-**内核进程对象**（Job、进程组）。两者共享 `drained / residue` 词汇和
-"未确认不得报成功"的原则，但**没有**共享记录结构：Job 是匿名内核对象，
-runner 一退出句柄即关闭，无法用持久化记录"重新打开"，因此 D4 的
-`ResidueKind` 不含进程类型（决策记录见 validation 文档）。
+D1–D5 管的是**文件系统资源**（ACL、临时目录、SID、隔离记录），D7 管的是**内核进程对象**（Job、进程组）。两者共享 `drained / residue` 词汇和"未确认不得报成功"的原则，但**没有**共享记录结构：Job 是匿名内核对象，runner 一退出句柄即关闭，无法用持久化记录"重新打开"，因此 D4 的`ResidueKind` 不含进程类型（决策记录见 validation 文档）。
